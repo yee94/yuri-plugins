@@ -112,6 +112,21 @@ function formatStatusText(
   return lines.join('\n');
 }
 
+const DAYUAN_TASK_RESULT_OUTPUT_SCHEMA = {
+  type: 'object',
+  properties: {
+    task_id: { type: 'string' },
+    state: { type: 'string' },
+    is_summary: { type: 'boolean' },
+    summary: { type: 'string' },
+    interaction_kind: { type: 'string' },
+    guidance: { type: 'string' },
+    raw_parts_count: { type: 'number' },
+    from_cache: { type: 'boolean' },
+  },
+  additionalProperties: true,
+} as const;
+
 export function createWecomPlugin(deps?: WecomPluginDeps) {
   return Plugin.define({
     id: PLUGIN_ID,
@@ -222,6 +237,19 @@ export function createWecomPlugin(deps?: WecomPluginDeps) {
             },
             additionalProperties: false,
           },
+          output: {
+            type: 'object',
+            properties: {
+              auth: { type: 'object', additionalProperties: true },
+              wecom_auth_url: { type: 'string' },
+              cli: { type: 'object', additionalProperties: true },
+              recent_receipts: {
+                type: 'array',
+                items: { type: 'object', additionalProperties: true },
+              },
+            },
+            additionalProperties: true,
+          },
           options: { namespace: 'wecom', codemode: true },
           async execute(rawInput, toolCtx) {
             const input = (rawInput ?? {}) as { include_receipts?: boolean };
@@ -262,6 +290,19 @@ export function createWecomPlugin(deps?: WecomPluginDeps) {
               },
             },
             additionalProperties: false,
+          },
+          output: {
+            type: 'object',
+            properties: {
+              authorization_url: { type: 'string' },
+              state: { type: 'string' },
+              expires_in_seconds: { type: 'number' },
+              desktop_required: { type: 'boolean' },
+              reused: { type: 'boolean' },
+              auth: { type: 'object', additionalProperties: true },
+              result: { type: 'object', additionalProperties: true },
+            },
+            additionalProperties: true,
           },
           options: { namespace: 'wecom', codemode: true },
           async execute(rawInput, toolCtx) {
@@ -370,6 +411,7 @@ export function createWecomPlugin(deps?: WecomPluginDeps) {
             required: ['action'],
             additionalProperties: false,
           },
+          output: DAYUAN_TASK_RESULT_OUTPUT_SCHEMA,
           options: { namespace: 'wecom', codemode: true },
           async execute(rawInput, toolCtx) {
             const input = (rawInput ?? {}) as Record<string, unknown>;
@@ -445,6 +487,7 @@ export function createWecomPlugin(deps?: WecomPluginDeps) {
             required: ['task_id'],
             additionalProperties: false,
           },
+          output: DAYUAN_TASK_RESULT_OUTPUT_SCHEMA,
           options: { namespace: 'wecom', codemode: true },
           async execute(rawInput, toolCtx) {
             const input = (rawInput ?? {}) as { task_id: string; wait_seconds?: number };
@@ -493,6 +536,7 @@ export function createWecomPlugin(deps?: WecomPluginDeps) {
             required: ['task_id', 'text'],
             additionalProperties: false,
           },
+          output: DAYUAN_TASK_RESULT_OUTPUT_SCHEMA,
           options: { namespace: 'wecom', codemode: true },
           async execute(rawInput, toolCtx) {
             const input = (rawInput ?? {}) as {
@@ -548,6 +592,19 @@ export function createWecomPlugin(deps?: WecomPluginDeps) {
               },
               required: ['domain', 'args'],
               additionalProperties: false,
+            },
+            output: {
+              type: 'object',
+              properties: {
+                ok: { type: 'boolean' },
+                domain: { type: 'string' },
+                args: { type: 'array', items: { type: 'string' } },
+                exit_code: { type: 'number' },
+                stdout: { type: 'string' },
+                stderr: { type: 'string' },
+                data: {},
+              },
+              additionalProperties: true,
             },
             options: { namespace: 'wecom', codemode: true },
             async execute(rawInput, toolCtx) {

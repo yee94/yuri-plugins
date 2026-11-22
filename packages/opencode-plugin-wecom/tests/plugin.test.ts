@@ -11,6 +11,8 @@ import {
 
 interface RegisteredTool {
   name: string;
+  input?: Record<string, unknown>;
+  output?: Record<string, unknown>;
   execute: (
     input: unknown,
     ctx: {
@@ -229,6 +231,10 @@ describe('opencode-plugin-wecom server plugin integration', () => {
       'wecom_read_start',
       'wecom_status',
     ]);
+    for (const tool of mock.tools.values()) {
+      expect(tool.output).toBeDefined();
+      expect(tool.output?.type).toBe('object');
+    }
     expect([...mock.commands.keys()].sort()).toEqual([
       'wecom-login',
       'wecom-logout',
