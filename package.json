@@ -9,7 +9,7 @@
   "scripts": {
     "build": "pnpm -r --if-present build",
     "type-check": "pnpm -r --if-present type-check",
-    "lint": "pnpm -r lint && biome check scripts package.json biome.json",
+    "lint": "pnpm -r lint && biome check package.json biome.json",
     "test": "pnpm -r test",
     "check": "pnpm lint && pnpm -r check"
   },
