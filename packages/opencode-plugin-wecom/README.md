@@ -10,10 +10,10 @@
 
 - **零桌面客户端依赖**：纯 HTTPS 协议实现，**不需要**在电脑上安装 WorkBuddy 客户端或企业微信桌面端，本机与远程 Linux 服务器均可直接运行。
 - **Device Flow 风格扫码登录 + 自动静默续期**：获取官方扫码链接，用手机企业微信扫一次码后，凭据持久化到 OpenCode 原生 `storage`，后续自动在后台刷新并换取企微 `access_token`。
-- **大圆 A2A 只读群聊查询**：基于白名单端点（`qyapi.weixin.qq.com/cgi-bin/a2a/api`）实现查群、读群聊摘要、搜消息摘要，内置：
+- **大圆 A2A 只读聊天查询**：按当前企业账号发现大圆并换取专用票据，支持查群、读会话摘要、搜消息摘要，内置：
   - `request_id` 幂等回执与参数指纹冲突检测
   - 终态结果本地缓存与 `401` / 过期错误码自动强制换票重试
-  - `input_required` 交互分类：放行纯文本澄清，**强制拦截敏感审批卡片（`approval`）并交由人工处理**
+   - 追加授权返回官方入口；仅允许回复纯文本澄清，审批卡交给本人处理
 - **可选 `@wecom/cli` 结构化办公域桥接**：如果本机安装了官方 `@wecom/cli`，可直接查询文档、智能表格、日程、会议、邮件、微盘、通讯录（默认严格只读；未安装完全不影响大圆 A2A）。
 - **Yuri / Desktop GUI 薄壳**：通过 `./gui-experimental` 提供中英文界面、顶栏连接状态 Pill、命令面板一键扫码与独立设置页，状态经 OpenCode RPC 实时同步。
 
@@ -58,14 +58,28 @@
 
 ---
 
-## 快速上手（扫码登录）
+## 快速上手：用 OpenCode 查企业微信
+
+安装插件后，在 OpenCode 里直接提问即可，不必手动调用工具。插件内置 `wecom-dayuan` Skill，Agent 会按需要查消息、引导授权或恢复原任务。支持企业微信内部单聊和群聊，不是个人微信，也不提供聊天原文。
+
+- 「根据最近 7 天我发出的消息和提到我的消息，看看我最近在跟进什么，注明会话和日期。」
+- 「总结『项目群』近 3 天的结论和待办。」
+- 「在企业微信里找一下与『联调』相关的讨论。」
+
+### 首次登录
 
 1. 在 OpenCode 会话中运行 `/wecom-login`（或让 Agent 调用 `wecom_login({ mode: "start" })`；在 Yuri 桌面端也可从设置页或命令面板选择 **「企业微信：扫码登录」**）。
 2. 在浏览器打开返回的 `authorization_url`，用**手机企业微信**扫码确认。
 3. 调用 `wecom_login({ mode: "wait", wait_seconds: 60 })`（或在 Yuri 设置页点击 **「确认已扫码」**），插件将轮询登录态并自动换取企业微信 user token。
-4. 登录成功后，后续所有大圆 A2A 查询均可直接调用并自动后台续期。
+4. 首次查询时，插件通过当前账号的 Agent Card 发现大圆并换取专用 Agent Ticket；仅在有票据后提交只读查询。企业微信用户 Token 不用于提交大圆任务。
 
-> **关于首次企业授权（403）**：如果 WorkBuddy 登录成功但换票返回 `WECOM_AUTH_REQUIRED_OPEN_WECOM_LOGIN`，请在浏览器打开 `https://www.workbuddy.cn/login/wecom-auth`（或执行 `wecom_login({ mode: "wecom_auth" })`）完成企业微信应用授权后重试。
+### 查询要求追加授权时
+
+1. 工具返回 `interaction_kind: "authorization_required"`，并在正文和 `authorization_url` 字段提供官方授权地址。Agent 应把链接写到**每个受阻事项的回复正文**里，不要只说「请先授权」。
+2. 用同一企业账号打开链接确认。确认后，Agent 调用 `wecom_login({ mode: "verify_wecom" })`；Yuri 也可以点「确认已授权」。验证只换票，不提交查询。
+3. 如果已拿到 `task_id`，用 `wecom_read_result` 继续查同一个任务；如果明确尚未提交才重试原查询。原任务仍待授权时，到官方界面查看该任务；若企业未开通权限，找管理员处理。
+
+任务审批卡是另一条流程。WorkBuddy 可用 `wxwork://` 唤起企业微信确认当前任务；本插件不生成或转发含审批票据的 deep link，也不代批。请在企业微信官方界面处理原审批卡，再查询原任务。
 
 ---
 
@@ -76,7 +90,7 @@
 | 工具名 | 作用 | 主要参数 |
 | --- | --- | --- |
 | `wecom_status` | 零网络请求检查登录态、企微 Token 就绪度、可选 `@wecom/cli` 状态及近期回执 | `include_receipts?: boolean` |
-| `wecom_login` | 扫码登录全生命周期管理 | `mode: "start" \| "finish" \| "wait" \| "wecom_auth" \| "logout"`, `wait_seconds?: number` |
+| `wecom_login` | 扫码登录、追加授权与换票验证 | `mode: "start" \| "finish" \| "wait" \| "wecom_auth" \| "verify_wecom" \| "logout"`, `wait_seconds?: number` |
 | `wecom_read_start` | 发起大圆 A2A 只读查询并返回摘要（`is_summary: true`） | `action: "search_groups" \| "read_chat" \| "search_messages"`, `query?`, `chat_name?`, `question?`, `time_range?`, `limit?`, `request_id?`, `wait_seconds?` |
 | `wecom_read_result` | 按 `task_id` 轮询或读取本地缓存的终态结果 | `task_id: string`, `wait_seconds?: number` |
 | `wecom_read_reply` | 对纯文本澄清类 `input_required` 任务回复澄清（审批卡片强制拒绝） | `task_id: string`, `text: string`, `request_id?`, `wait_seconds?` |
@@ -96,7 +110,7 @@
 
 导出 `WecomRpc`（`id: "opencode-plugin-wecom"`），供 Yuri GUI / TUI 或其他插件调用：
 
-- Methods：`status`、`startLogin`、`finishLogin`、`logout`、`recentReceipts`
+- Methods：`status`、`startLogin`、`finishLogin`、`verifyWecom`、`logout`、`recentReceipts`
 - Events：`authChanged`（`{ phase, wecom_configured }`）
 
 ---

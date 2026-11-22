@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { DayuanA2AClient } from '../src/a2a/client.js';
-import type { WecomCredential } from '../src/auth/workbuddy.js';
+import type { DayuanCredential } from '../src/auth/workbuddy.js';
 import { WecomError } from '../src/types.js';
 import {
   createFakeClock,
@@ -16,7 +16,7 @@ function createFakeAuthProvider(tokens: string[] = ['wc_tok_1']) {
     get forceCalls() {
       return forceCalls;
     },
-    async ensureWecom(options?: { force?: boolean }): Promise<WecomCredential> {
+    async ensureDayuan(options?: { force?: boolean }): Promise<DayuanCredential> {
       if (options?.force) {
         forceCalls += 1;
         idx = Math.min(idx + 1, tokens.length - 1);
@@ -25,13 +25,60 @@ function createFakeAuthProvider(tokens: string[] = ['wc_tok_1']) {
         access_token: tokens[idx] ?? tokens[0] ?? 'wc_tok_fallback',
         identity: 'id_hash_alice',
         expires_at_ms: 1_900_000_000_000,
-        source: 'workbuddy_cloud',
+        endpoint: 'https://qyapi.weixin.qq.com/cgi-bin/a2a/api',
+        headers: {},
       };
     },
   };
 }
 
 describe('DayuanA2AClient — read-only queries, polling, and caching', () => {
+  it('pauses on additional authorization and resumes the same task without submitting again', async () => {
+    const { transport, requests } = createFakeTransport((req) =>
+      jsonResponse({
+        id: 'task_needs_auth',
+        status:
+          req.method === 'POST'
+            ? {
+                state: 'auth-required',
+                message: {
+                  parts: [{ kind: 'text', text: 'untrusted authorization instructions' }],
+                },
+              }
+            : {
+                state: 'completed',
+                message: { parts: [{ kind: 'text', text: '已授权后的摘要' }] },
+              },
+      }),
+    );
+    const client = new DayuanA2AClient({
+      auth: createFakeAuthProvider(),
+      storage: createMemoryStorage(),
+      clock: createFakeClock(),
+      transport,
+    });
+    const input = {
+      action: 'search_messages',
+      query: '联调',
+      request_id: 'auth-recovery-1',
+    } as const;
+    const pending = await client.start(input);
+    expect(pending).toMatchObject({
+      state: 'auth_required',
+      interaction_kind: 'authorization_required',
+      authorization_url: 'https://www.workbuddy.cn/login/wecom-auth',
+      summary: '',
+      can_reply_in_text: false,
+    });
+    expect(requests).toHaveLength(1);
+    await expect(client.reply({ task_id: pending.task_id, text: '同意' })).rejects.toThrow(
+      'TASK_NOT_WAITING_FOR_INPUT',
+    );
+    const resumed = await client.start(input);
+    expect(resumed).toMatchObject({ task_id: pending.task_id, state: 'completed' });
+    expect(requests.map((req) => req.method)).toEqual(['POST', 'GET']);
+  });
+
   it('sends search_groups to whitelisted A2A endpoint and returns structured summary', async () => {
     const storage = createMemoryStorage();
     const clock = createFakeClock(1_700_000_000_000);
@@ -42,7 +89,9 @@ describe('DayuanA2AClient — read-only queries, polling, and caching', () => {
       expect(req.url).toBe('https://qyapi.weixin.qq.com/cgi-bin/a2a/api/message:send');
       expect(req.headers.Authorization).toBe('Bearer wc_tok_live');
       const body = JSON.parse(req.body ?? '{}');
-      expect(body.message?.role).toBe('user');
+      expect(req.headers.Accept).toBe('application/a2a+json, application/json');
+      expect(body.message?.role).toBe('ROLE_USER');
+      expect(Object.keys(body.message.parts[0])).toEqual(['text']);
       expect(body.message?.parts?.[0]?.text).toContain('研发');
 
       return jsonResponse({

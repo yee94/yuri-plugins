@@ -1,6 +1,6 @@
 {
   "name": "opencode-plugin-wecom",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "OpenCode V2 plugin for WeCom (Enterprise WeChat) via desktop-free WorkBuddy cloud auth, Dayuan A2A read-only queries, optional @wecom/cli bridge, and Yuri/Desktop GUI controls",
   "type": "module",
   "exports": {

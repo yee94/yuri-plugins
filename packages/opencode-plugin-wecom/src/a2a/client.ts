@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import type { WecomCredential } from '../auth/workbuddy.js';
+import { type DayuanCredential, WECOM_LOGIN_URL } from '../auth/workbuddy.js';
 import { createFetchTransport } from '../http.js';
 import {
   AsyncKeyLock,
@@ -11,8 +11,6 @@ import {
   WecomError,
 } from '../types.js';
 
-export const DAYUAN_A2A_ORIGIN = 'https://qyapi.weixin.qq.com';
-export const DAYUAN_A2A_BASE_PATH = '/cgi-bin/a2a/api';
 export const A2A_MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 
 const RECEIPT_PREFIX = 'wecom/a2a/receipt/';
@@ -30,13 +28,19 @@ export type A2ATaskState =
   | 'submitted'
   | 'working'
   | 'input_required'
+  | 'auth_required'
   | 'completed'
   | 'failed'
   | 'canceled'
   | 'rejected'
   | 'unknown';
 
-export type InteractionKind = 'none' | 'text_clarification' | 'approval_required' | 'unsupported';
+export type InteractionKind =
+  | 'none'
+  | 'text_clarification'
+  | 'approval_required'
+  | 'authorization_required'
+  | 'unsupported';
 
 export interface SearchGroupsInput {
   readonly action: 'search_groups';
@@ -101,6 +105,7 @@ export interface DayuanTaskResult {
   readonly interaction_kind: InteractionKind;
   readonly can_reply_in_text: boolean;
   readonly human_action_required: boolean;
+  readonly authorization_url?: string;
   readonly guidance?: string;
   readonly from_cache: boolean;
   readonly updated_at_ms: number;
@@ -138,12 +143,7 @@ interface StoredTaskRecord {
 }
 
 export interface WecomCredentialProvider {
-  ensureWecom(options?: {
-    force?: boolean;
-    refreshAccount?: boolean;
-    deadlineMonoMs?: number;
-    signal?: AbortSignal;
-  }): Promise<WecomCredential>;
+  ensureDayuan(options?: { force?: boolean; signal?: AbortSignal }): Promise<DayuanCredential>;
 }
 
 export interface DayuanA2AClientOptions {
@@ -188,12 +188,31 @@ function normalizeWaitSeconds(value: number | undefined): number {
 }
 
 function normalizeState(raw: unknown): A2ATaskState {
+  if (typeof raw === 'number') {
+    const states: readonly A2ATaskState[] = [
+      'unknown',
+      'submitted',
+      'working',
+      'completed',
+      'failed',
+      'canceled',
+      'input_required',
+      'rejected',
+      'auth_required',
+    ];
+    return states[raw] ?? 'unknown';
+  }
   if (typeof raw !== 'string') return 'unknown';
-  const normalized = raw.trim().toLowerCase().replace(/-/g, '_');
+  const normalized = raw
+    .trim()
+    .toLowerCase()
+    .replace(/-/g, '_')
+    .replace(/^task_state_/, '');
   switch (normalized) {
     case 'submitted':
     case 'working':
     case 'input_required':
+    case 'auth_required':
     case 'completed':
     case 'failed':
     case 'canceled':
@@ -213,7 +232,7 @@ function isTerminalState(state: A2ATaskState): boolean {
 }
 
 function isSettledForWait(state: A2ATaskState): boolean {
-  return isTerminalState(state) || state === 'input_required';
+  return isTerminalState(state) || state === 'input_required' || state === 'auth_required';
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
@@ -336,12 +355,15 @@ function fingerprintOf(canonical: Record<string, unknown>): string {
   return createHash('sha256').update(JSON.stringify(canonical)).digest('hex');
 }
 
-function buildWhitelistedUrl(route: { kind: 'send' } | { kind: 'task'; taskId: string }): string {
+function buildWhitelistedUrl(
+  endpoint: string,
+  route: { kind: 'send' } | { kind: 'task'; taskId: string },
+): string {
   if (route.kind === 'send') {
-    return `${DAYUAN_A2A_ORIGIN}${DAYUAN_A2A_BASE_PATH}/message:send`;
+    return `${endpoint}/message:send`;
   }
   const safeId = assertSafeId(route.taskId, 'task_id');
-  return `${DAYUAN_A2A_ORIGIN}${DAYUAN_A2A_BASE_PATH}/tasks/${encodeURIComponent(safeId)}?historyLength=0`;
+  return `${endpoint}/tasks/${encodeURIComponent(safeId)}?historyLength=0`;
 }
 
 export class DayuanA2AClient {
@@ -381,21 +403,26 @@ export class DayuanA2AClient {
     const statusObj = asRecord(taskObj.status);
     const state = normalizeState(statusObj?.state ?? taskObj.state);
     const parts = collectParts(taskObj);
-    const summary = extractSummaryText(parts);
+    const approval =
+      (state === 'input_required' || state === 'auth_required') && hasApprovalMarker(taskObj);
+    const summary = state === 'auth_required' || approval ? '' : extractSummaryText(parts);
 
     let interactionKind: InteractionKind = 'none';
     let canReplyInText = false;
     let humanActionRequired = false;
     let guidance: string | undefined;
 
-    if (state === 'input_required') {
-      if (hasApprovalMarker(parts) || hasApprovalMarker(taskObj)) {
-        interactionKind = 'approval_required';
-        canReplyInText = false;
-        humanActionRequired = true;
-        guidance =
-          '检测到企业微信敏感审批卡片（approval），插件已禁止自动代批。请在手机企业微信中手动确认审批后再重新查询。';
-      } else if (summary.length > 0) {
+    if (approval) {
+      interactionKind = 'approval_required';
+      humanActionRequired = true;
+      guidance = '请本人在企业微信官方界面处理原审批卡，完成后查询原任务状态。';
+    } else if (state === 'auth_required') {
+      interactionKind = 'authorization_required';
+      humanActionRequired = true;
+      guidance =
+        '大圆要求追加授权。请用同一企业账号在官方授权页确认，完成后查询原任务状态。若原任务仍待授权，请在 WorkBuddy 或企业微信官方界面查看该任务。';
+    } else if (state === 'input_required') {
+      if (summary.length > 0) {
         interactionKind = 'text_clarification';
         canReplyInText = true;
         guidance = '大圆需要进一步澄清问题，请调用 wecom_read_reply 回复澄清文本。';
@@ -420,6 +447,9 @@ export class DayuanA2AClient {
       interaction_kind: interactionKind,
       can_reply_in_text: canReplyInText,
       human_action_required: humanActionRequired,
+      ...(interactionKind === 'authorization_required'
+        ? { authorization_url: WECOM_LOGIN_URL }
+        : {}),
       ...(guidance ? { guidance } : {}),
       from_cache: meta.from_cache,
       updated_at_ms: this.clock.now(),
@@ -432,18 +462,23 @@ export class DayuanA2AClient {
     body?: Record<string, unknown>;
     signal?: AbortSignal;
     allowAuthRetry?: boolean;
+    expectedIdentity?: string;
   }): Promise<{ payload: Record<string, unknown>; identity: string }> {
-    const url = buildWhitelistedUrl(options.route);
-    let credential = await this.auth.ensureWecom({ signal: options.signal });
+    let credential = await this.auth.ensureDayuan({ signal: options.signal });
+    if (options.expectedIdentity && credential.identity !== options.expectedIdentity) {
+      throw new WecomError('DAYUAN_IDENTITY_CHANGED', true);
+    }
+    const url = buildWhitelistedUrl(credential.endpoint, options.route);
 
-    const executeOnce = async (token: string) => {
+    const executeOnce = async (ticket: DayuanCredential) => {
       const headers: Record<string, string> = {
-        Accept: 'application/json',
-        Authorization: `Bearer ${token}`,
+        ...ticket.headers,
+        Accept: 'application/a2a+json, application/json',
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${ticket.access_token}`,
       };
       let serialized: string | undefined;
       if (options.method === 'POST') {
-        headers['Content-Type'] = 'application/json';
         serialized = JSON.stringify(options.body ?? {});
       }
       const response = await this.transport({
@@ -465,30 +500,47 @@ export class DayuanA2AClient {
           }
           parsed = decoded as Record<string, unknown>;
         } catch (err) {
+          if (response.status === 401) {
+            return { status: 401, errcode: 0, agentCode: undefined, parsed, isAuthFailure: true };
+          }
           if (err instanceof WecomError) throw err;
           throw new WecomError('INVALID_A2A_JSON');
         }
       }
 
       const errcode = typeof parsed.errcode === 'number' ? parsed.errcode : 0;
-      const isAuthFailure = response.status === 401 || TOKEN_EXPIRED_ERRCODES.has(errcode);
-      return { status: response.status, errcode, parsed, isAuthFailure };
+      const agentCode = asRecord(parsed.error)?.code;
+      const isAuthFailure =
+        response.status === 401 ||
+        errcode === 896004 ||
+        agentCode === 896004 ||
+        TOKEN_EXPIRED_ERRCODES.has(errcode);
+      return { status: response.status, errcode, agentCode, parsed, isAuthFailure };
     };
 
-    let attempt = await executeOnce(credential.access_token);
+    let attempt = await executeOnce(credential);
     if (attempt.isAuthFailure && (options.allowAuthRetry ?? true)) {
-      credential = await this.auth.ensureWecom({ force: true, signal: options.signal });
-      attempt = await executeOnce(credential.access_token);
+      const renewed = await this.auth.ensureDayuan({ force: true, signal: options.signal });
+      if (renewed.identity !== credential.identity || renewed.endpoint !== credential.endpoint) {
+        throw new WecomError('DAYUAN_IDENTITY_OR_ENDPOINT_CHANGED', true);
+      }
+      credential = renewed;
+      attempt = await executeOnce(credential);
     }
 
     if (attempt.isAuthFailure) {
-      throw new WecomError('WECOM_TOKEN_REJECTED_LOGIN_REQUIRED', true);
+      throw new WecomError('WECOM_AUTH_REQUIRED_OPEN_WECOM_LOGIN', true);
     }
     if (attempt.status === 403) {
       throw new WecomError('A2A_FORBIDDEN', true);
     }
     if (attempt.status < 200 || attempt.status >= 300) {
-      throw new WecomError(`A2A_HTTP_${attempt.status}`);
+      const code = Number.isInteger(attempt.agentCode)
+        ? attempt.agentCode
+        : attempt.errcode || undefined;
+      throw new WecomError(
+        `A2A_HTTP_${attempt.status}${code === undefined ? '' : `_CODE_${code}`}`,
+      );
     }
     if (attempt.errcode !== 0) {
       throw new WecomError(`A2A_ERRCODE_${attempt.errcode}`);
@@ -538,8 +590,19 @@ export class DayuanA2AClient {
       await this.clock.sleep(Math.min(POLL_INTERVAL_MS, remaining), options?.signal);
       const { payload } = await this.requestA2A({
         method: 'GET',
+        expectedIdentity: identity,
         route: { kind: 'task', taskId: current.task_id },
         signal: options?.signal,
+      }).catch((err: unknown) => {
+        if (!(err instanceof WecomError) || err.code !== 'WECOM_AUTH_REQUIRED_OPEN_WECOM_LOGIN')
+          throw err;
+        return {
+          payload: {
+            id: current.task_id,
+            contextId: current.context_id,
+            status: { state: 'auth_required' },
+          },
+        };
       });
 
       current = this.parseTaskPayload(payload, {
@@ -569,7 +632,7 @@ export class DayuanA2AClient {
     const waitSeconds = normalizeWaitSeconds(input.wait_seconds);
     const fingerprint = fingerprintOf(canonical);
 
-    const credential = await this.auth.ensureWecom({ signal: options?.signal });
+    const credential = await this.auth.ensureDayuan({ signal: options?.signal });
     const receiptKey = this.receiptKey(credential.identity, requestId);
 
     return this.lock.run(`receipt:${receiptKey}`, async () => {
@@ -583,7 +646,11 @@ export class DayuanA2AClient {
         if (existing.status === 'submit_unknown') {
           throw new WecomError('SUBMIT_OUTCOME_UNKNOWN', true);
         }
-        if (existing.result && isSettledForWait(existing.result.state)) {
+        if (
+          existing.result &&
+          existing.result.state !== 'auth_required' &&
+          isSettledForWait(existing.result.state)
+        ) {
           return { ...existing.result, from_cache: true };
         }
         if (existing.task_id) {
@@ -617,12 +684,13 @@ export class DayuanA2AClient {
       try {
         const res = await this.requestA2A({
           method: 'POST',
+          expectedIdentity: credential.identity,
           route: { kind: 'send' },
           body: {
             message: {
               messageId: requestId,
-              role: 'user',
-              parts: [{ kind: 'text', text: prompt }],
+              role: 'ROLE_USER',
+              parts: [{ text: prompt }],
             },
           },
           signal: options?.signal,
@@ -676,11 +744,15 @@ export class DayuanA2AClient {
 
     const existing = await this.loadTaskRecord(taskId);
     if (existing && isTerminalState(existing.result.state)) {
+      const credential = await this.auth.ensureDayuan({ signal: options?.signal });
+      if (existing.identity !== credential.identity)
+        throw new WecomError('DAYUAN_IDENTITY_CHANGED', true);
       return { ...existing.result, from_cache: true };
     }
 
     const { payload, identity } = await this.requestA2A({
       method: 'GET',
+      expectedIdentity: existing?.identity,
       route: { kind: 'task', taskId },
       signal: options?.signal,
     });
@@ -743,14 +815,15 @@ export class DayuanA2AClient {
 
       const { payload, identity } = await this.requestA2A({
         method: 'POST',
+        expectedIdentity: record.identity,
         route: { kind: 'send' },
         body: {
           message: {
             messageId: replyMessageId,
-            role: 'user',
+            role: 'ROLE_USER',
             taskId,
             ...(record.context_id ? { contextId: record.context_id } : {}),
-            parts: [{ kind: 'text', text }],
+            parts: [{ text }],
           },
         },
         signal: options?.signal,

@@ -53,6 +53,14 @@ export interface WecomCredential {
   source: 'workbuddy_cloud';
 }
 
+export interface DayuanCredential {
+  access_token: string;
+  identity: string;
+  endpoint: string;
+  headers: Record<string, string>;
+  expires_at_ms: number;
+}
+
 interface StoredCloudAuth {
   phase: AuthPhase;
   pending?: {
@@ -74,6 +82,7 @@ export interface WorkBuddyStatus {
   refresh_credential_present: boolean;
   wecom_expires_at_ms: number | null;
   wecom_configured: boolean;
+  dayuan_ticket_ready?: boolean;
   authorization_verified: boolean;
 }
 
@@ -103,6 +112,81 @@ export interface WorkBuddyAuthOptions {
 const TOKEN_STATE_PATH_RE = /^\/v2\/plugin\/auth\/token\?state=[A-Za-z0-9_%.-]+$/;
 const EXCHANGE_PATH_RE =
   /^\/console\/enterprises\/[A-Za-z0-9_%.-]+\/oneid_openapi\/exchange-wecom-token$/;
+const DAYUAN_DISCOVERY_PATH = '/a2a/cards/self';
+const DAYUAN_TICKET_PATH = '/a2a/credentials/wecom-a2a/tickets';
+
+function record(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function dayuanEndpoint(discovery: Record<string, unknown>): string {
+  const data = record(discovery.data);
+  const credentials = discovery.credentials ?? data?.credentials;
+  const cards =
+    discovery.cards ??
+    discovery.agents ??
+    discovery.items ??
+    discovery.list ??
+    discovery.result ??
+    data?.cards ??
+    data?.agents ??
+    data?.items ??
+    data?.list ??
+    data?.result;
+  if (!Array.isArray(credentials) || !Array.isArray(cards)) {
+    throw new WecomError('DAYUAN_NOT_AVAILABLE', true);
+  }
+  const matches = new Set<string>();
+  for (const item of cards) {
+    const entry = record(item);
+    const card = record(entry?.card ?? entry?.agentCard ?? entry?.agent_card) ?? entry;
+    const interfaces = card?.supportedInterfaces;
+    const advertised =
+      Array.isArray(interfaces) && interfaces.length
+        ? interfaces
+            .map(record)
+            .filter((i) => !i?.protocolBinding || i.protocolBinding === 'HTTP+JSON')
+            .map((i) => i?.url)
+        : [card?.url ?? entry?.url];
+    for (const url of advertised) {
+      if (typeof url !== 'string') continue;
+      const base = url.replace(/\/+$/, '');
+      // No arbitrary discovery URL may receive a ticket or account headers.
+      if (
+        !/^https:\/\/qyapi\.weixin\.qq\.com\/cgi-bin\/[A-Za-z0-9_-]+(?:\/[A-Za-z0-9_-]+)*$/.test(
+          base,
+        )
+      )
+        continue;
+      if (
+        credentials.some((item) => {
+          const cred = record(item);
+          const endpoint = cred?.endpoint;
+          if (cred?.id !== 'wecom-a2a' || typeof endpoint !== 'string') return false;
+          const prefix = endpoint.replace(/\/+$/, '');
+          return (
+            base === prefix ||
+            (prefix.startsWith('https://qyapi.weixin.qq.com/cgi-bin/') &&
+              base.startsWith(`${prefix}/`))
+          );
+        })
+      )
+        matches.add(base);
+    }
+  }
+  const endpoint = matches.values().next().value;
+  if (!endpoint || matches.size !== 1) throw new WecomError('DAYUAN_NOT_AVAILABLE', true);
+  return endpoint;
+}
+
+function wecomAuthorizationError(err: unknown): boolean {
+  return (
+    err instanceof WecomError &&
+    /^(HTTP_40[13](?:_CODE_\d+)?|(?:HTTP_\d+_CODE|CLOUD_CODE)_1011[01])$/.test(err.code)
+  );
+}
 
 export function formatLoginUrl(rawUrl: string): string {
   const parsed = new URL(rawUrl);
@@ -167,6 +251,12 @@ function isFresh(expiryMs: unknown, nowMs: number): boolean {
   return parseDeadline(expiryMs) > nowMs + FRESH_BUFFER_MS;
 }
 
+function dayuanIdentity(enterprise: string, uid: string, wecomIdentity: string): string {
+  return createHash('sha256')
+    .update(JSON.stringify([enterprise, uid, wecomIdentity]))
+    .digest('hex');
+}
+
 function isAllowedEndpoint(method: 'GET' | 'POST', path: string): boolean {
   if (
     method === 'POST' &&
@@ -193,6 +283,7 @@ export class WorkBuddyAuth {
   private readonly clock: Clock;
   private readonly onAuthChange?: (status: WorkBuddyStatus) => void | Promise<void>;
   private readonly lock = new AsyncKeyLock();
+  private dayuan?: DayuanCredential;
 
   constructor(options: WorkBuddyAuthOptions) {
     this.storage = options.storage;
@@ -222,6 +313,16 @@ export class WorkBuddyAuth {
 
   private toStatus(doc: StoredCloudAuth): WorkBuddyStatus {
     const auth = doc.auth;
+    const now = this.clock.now();
+    const ticketReady = Boolean(
+      this.dayuan &&
+        doc.phase === 'ready' &&
+        doc.account?.enterpriseId &&
+        doc.wecom &&
+        this.dayuan.identity ===
+          dayuanIdentity(doc.account.enterpriseId, doc.account.uid, doc.wecom.identity) &&
+        isFresh(this.dayuan.expires_at_ms, now),
+    );
     return {
       phase: doc.phase,
       desktop_required: false,
@@ -229,9 +330,10 @@ export class WorkBuddyAuth {
       account_expires_at_ms: auth?.expiresAt || null,
       refresh_expires_at_ms: auth?.refreshExpiresAt || null,
       refresh_credential_present: Boolean(auth?.refreshToken),
-      wecom_expires_at_ms: doc.wecom?.expires_at_ms ?? null,
-      wecom_configured: Boolean(doc.wecom?.access_token),
-      authorization_verified: false,
+      wecom_expires_at_ms: doc.wecom?.expires_at_ms || null,
+      wecom_configured: Boolean(doc.wecom?.access_token && doc.wecom.expires_at_ms > now),
+      ...(this.dayuan ? { dayuan_ticket_ready: ticketReady } : {}),
+      authorization_verified: ticketReady,
     };
   }
 
@@ -612,17 +714,30 @@ export class WorkBuddyAuth {
       }
 
       const route = `/console/enterprises/${encodeURIComponent(enterpriseId)}/oneid_openapi/exchange-wecom-token`;
-      let exchanged: Record<string, unknown>;
-      try {
-        exchanged = await this.requestCloud({
+      const exchange = () =>
+        this.requestCloud({
           method: 'POST',
           path: route,
           auth: doc.auth,
           deadlineMonoMs: options?.deadlineMonoMs,
           signal: options?.signal,
         });
+      let exchanged: Record<string, unknown>;
+      try {
+        exchanged = await exchange().catch((err: unknown) => {
+          if (err instanceof WecomError && /^(?:HTTP_\d+_CODE|CLOUD_CODE)_10113$/.test(err.code)) {
+            return exchange();
+          }
+          throw err;
+        });
       } catch (err) {
-        if (err instanceof WecomError && err.code.startsWith('HTTP_403')) {
+        if (wecomAuthorizationError(err)) {
+          this.dayuan = undefined;
+          if (doc.wecom) {
+            // Keep the identity binding, but never reuse the rejected token.
+            doc.wecom = { ...doc.wecom, expires_at_ms: 0 };
+            await this.save(doc);
+          }
           throw new WecomError('WECOM_AUTH_REQUIRED_OPEN_WECOM_LOGIN', true);
         }
         throw err;
@@ -659,8 +774,127 @@ export class WorkBuddyAuth {
     });
   }
 
+  async verifyWecom(signal?: AbortSignal): Promise<WorkBuddyStatus> {
+    await this.ensureWecom({ force: true, signal });
+    await this.ensureDayuan({ force: true, signal });
+    return this.status();
+  }
+
+  async ensureDayuan(options?: {
+    force?: boolean;
+    signal?: AbortSignal;
+  }): Promise<DayuanCredential> {
+    const user = await this.ensureWecom({ signal: options?.signal });
+    return this.lock.run('auth', async () => {
+      options?.signal?.throwIfAborted();
+      const doc = await this.load();
+      const enterprise = doc.account?.enterpriseId;
+      const uid = doc.account?.uid;
+      if (
+        doc.phase !== 'ready' ||
+        !doc.auth ||
+        !enterprise ||
+        !uid ||
+        doc.wecom?.identity !== user.identity ||
+        doc.wecom.access_token !== user.access_token
+      ) {
+        throw new WecomError('LOGIN_REQUIRED', true);
+      }
+      const identity = dayuanIdentity(enterprise, uid, user.identity);
+      if (
+        !options?.force &&
+        this.dayuan?.identity === identity &&
+        isFresh(this.dayuan.expires_at_ms, this.clock.now())
+      )
+        return this.dayuan;
+      this.dayuan = undefined;
+      const headers: Record<string, string> = {
+        'X-User-Id': assertSecret(uid),
+        'X-Enterprise-Id': assertSecret(enterprise),
+        'X-Tenant-Id': assertSecret(enterprise),
+      };
+      if (typeof doc.auth.domain === 'string' && doc.auth.domain) {
+        headers['X-Domain'] = assertSecret(doc.auth.domain);
+      }
+      const cloud = async (method: 'GET' | 'POST', path: string) => {
+        let response: Awaited<ReturnType<HttpTransport>>;
+        try {
+          response = await this.transport({
+            method,
+            url: `${WORKBUDDY_ORIGIN}${path}`,
+            headers: {
+              ...headers,
+              Accept: 'application/json',
+              Authorization: `Bearer ${assertSecret(doc.auth?.accessToken)}`,
+            },
+            maxBytes: AUTH_MAX_RESPONSE_BYTES,
+            timeoutMs: 15_000,
+            signal: options?.signal,
+          });
+        } catch {
+          options?.signal?.throwIfAborted();
+          throw new WecomError('DAYUAN_AUTH_UNAVAILABLE', true);
+        }
+        const stage = method === 'GET' ? 'DAYUAN_DISCOVERY' : 'DAYUAN_TICKET';
+        let payload: Record<string, unknown> | undefined;
+        try {
+          payload = record(JSON.parse(response.body));
+        } catch {}
+        const code = payload?.code ?? record(payload?.error)?.code;
+        if (code === 10110 || code === 10111 || response.status === 401) {
+          throw new WecomError('WECOM_AUTH_REQUIRED_OPEN_WECOM_LOGIN', true);
+        }
+        if (code === 10113 && method === 'POST') return undefined;
+        if (
+          response.status < 200 ||
+          response.status >= 300 ||
+          (typeof code === 'number' && code !== 0)
+        ) {
+          throw new WecomError(
+            `${stage}_HTTP_${response.status}${Number.isInteger(code) ? `_CODE_${code}` : ''}`,
+            true,
+          );
+        }
+        if (!payload) throw new WecomError(`${stage}_INVALID_RESPONSE`, true);
+        return payload;
+      };
+      const discovery = await cloud('GET', DAYUAN_DISCOVERY_PATH);
+      const endpoint = dayuanEndpoint(discovery ?? {});
+      const ticketPath = options?.force
+        ? `${DAYUAN_TICKET_PATH}?force_refresh=true`
+        : DAYUAN_TICKET_PATH;
+      const payload =
+        (await cloud('POST', ticketPath)) ??
+        (await cloud('POST', `${DAYUAN_TICKET_PATH}?force_refresh=true`));
+      if (!payload) throw new WecomError('DAYUAN_TICKET_CODE_10113', true);
+      const ticket = record(payload.data) ?? payload;
+      const raw =
+        ticket?.ticket ??
+        ticket?.access_token ??
+        ticket?.accessToken ??
+        ticket?.token ??
+        ticket?.credential ??
+        ticket?.agent_ticket ??
+        ticket?.agentTicket;
+      const ttl = parseDeadline(ticket?.expires_in ?? ticket?.expiresIn ?? ticket?.ttl);
+      const absolute = parseDeadline(ticket?.expires_at ?? ticket?.expiresAt);
+      const now = this.clock.now();
+      const expires = ttl ? now + ttl * 1000 : absolute < 1e12 ? absolute * 1000 : absolute;
+      if (expires <= now) throw new WecomError('DAYUAN_TICKET_EXPIRY_MISSING', true);
+      this.dayuan = {
+        endpoint,
+        headers,
+        identity,
+        access_token: assertSecret(raw),
+        expires_at_ms: expires,
+      };
+      return this.dayuan;
+    });
+  }
+
   async logout(): Promise<WorkBuddyStatus> {
     return this.lock.run('auth', async () => {
+      this.dayuan = undefined;
       await this.storage.remove(AUTH_STORAGE_KEY);
       const status = await this.status();
       if (this.onAuthChange) {

@@ -195,6 +195,7 @@ describe('WorkBuddyAuth — renewal, safety, and identity protection', () => {
     onRefresh?: () => ReturnType<typeof jsonResponse> | Promise<ReturnType<typeof jsonResponse>>;
     onExchange?: (count: number) => ReturnType<typeof jsonResponse>;
     onAccount?: (count: number) => ReturnType<typeof jsonResponse>;
+    onDayuan?: (url: string) => ReturnType<typeof jsonResponse>;
   }) {
     const storage = createMemoryStorage();
     const clock = options?.clock ?? createFakeClock(1_700_000_000_000);
@@ -248,6 +249,9 @@ describe('WorkBuddyAuth — renewal, safety, and identity protection', () => {
             expires_in: 3600,
           },
         });
+      }
+      if (req.url.startsWith('https://www.workbuddy.cn/a2a/') && options?.onDayuan) {
+        return options.onDayuan(req.url);
       }
       throw new Error(`unexpected ${req.url}`);
     });
@@ -317,6 +321,40 @@ describe('WorkBuddyAuth — renewal, safety, and identity protection', () => {
     });
 
     await expect(auth.ensureWecom()).rejects.toThrow('WECOM_AUTH_REQUIRED_OPEN_WECOM_LOGIN');
+  });
+
+  it('does not exchange a ticket for an untrusted discovery endpoint', async () => {
+    const endpoint = 'https://qyapi.weixin.qq.com.example.test/cgi-bin/a2a/api';
+    const { auth, requests } = await loginReadyAuth({
+      onDayuan: () =>
+        jsonResponse({
+          cards: [{ url: endpoint }],
+          credentials: [{ id: 'wecom-a2a', endpoint }],
+        }),
+    });
+    await expect(auth.ensureDayuan()).rejects.toThrow('DAYUAN_NOT_AVAILABLE');
+    expect(requests.some((req) => req.url.includes('/tickets'))).toBe(false);
+  });
+
+  it('retries 10113 once, caches only the scoped Agent Ticket, and forces a fresh exchange on rejection', async () => {
+    const endpoint = 'https://qyapi.weixin.qq.com/cgi-bin/a2a/api';
+    let calls = 0;
+    const { auth, requests } = await loginReadyAuth({
+      onDayuan: (url) => {
+        if (url.endsWith('/cards/self'))
+          return jsonResponse({
+            cards: [{ url: endpoint }],
+            credentials: [{ id: 'wecom-a2a', endpoint }],
+          });
+        calls += 1;
+        if (calls === 1) return jsonResponse({ code: 10113 }, 400);
+        return jsonResponse({ code: 0, data: { ticket: `dayuan_${calls}`, expires_in: 3600 } });
+      },
+    });
+    expect((await auth.ensureDayuan()).access_token).toBe('dayuan_2');
+    expect((await auth.ensureDayuan()).access_token).toBe('dayuan_2');
+    expect((await auth.ensureDayuan({ force: true })).access_token).toBe('dayuan_3');
+    expect(requests.filter((req) => req.url.endsWith('force_refresh=true'))).toHaveLength(2);
   });
 
   it('rejects silent WeCom identity change across token exchanges', async () => {

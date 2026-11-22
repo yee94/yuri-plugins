@@ -62,13 +62,15 @@ export default Plugin.define({
         'Scan with mobile Enterprise WeChat; credentials auto-refresh in the background.',
       'row.wecom_auth': 'WeCom App Authorization',
       'row.wecom_auth.desc':
-        'Open secondary WorkBuddy WeCom authorization page if token exchange returns 403.',
+        'Open the official authorization page. After granting access, verify the WeCom and Dayuan credentials.',
       'row.logout': 'Sign Out',
       'row.logout.desc': 'Remove stored WorkBuddy and WeCom tokens from OpenCode storage.',
       'btn.refresh': 'Refresh',
       'btn.login': 'Open QR Login',
       'btn.finish': 'Verify Scan',
       'btn.open_wecom_auth': 'Open WeCom Auth',
+      'btn.verify_wecom_auth': 'Verify Authorization',
+      'toast.auth_verified': 'WeCom authorization and Dayuan ticket verified',
       'btn.logout': 'Sign Out',
       'toast.login_opened': 'Opened WeCom QR login in browser',
       'toast.login_opened_desc': 'Scan with mobile Enterprise WeChat, then click Verify Scan.',
@@ -96,13 +98,16 @@ export default Plugin.define({
       'row.login': '手机企微扫码登录',
       'row.login.desc': '用手机企业微信扫一次码，后续自动后台续期换票，无需安装桌面端。',
       'row.wecom_auth': '企微应用二次授权',
-      'row.wecom_auth.desc': '如果换票提示 403，请点此打开官方 wecom-auth 页面完成企业授权。',
+      'row.wecom_auth.desc':
+        '需要追加授权或授权失效时，打开官方页面确认，再验证企业微信和大圆凭据。',
       'row.logout': '退出登录',
       'row.logout.desc': '清除 OpenCode 本地持久化存储的 WorkBuddy / 企微凭据。',
       'btn.refresh': '刷新状态',
       'btn.login': '打开扫码页',
       'btn.finish': '确认已扫码',
       'btn.open_wecom_auth': '打开企微授权页',
+      'btn.verify_wecom_auth': '确认已授权',
+      'toast.auth_verified': '企业微信授权和大圆票据已验证',
       'btn.logout': '清除凭据',
       'toast.login_opened': '已在浏览器打开企微扫码页',
       'toast.login_opened_desc': '请用手机企业微信扫码确认，完成后点击「确认已扫码」。',
@@ -185,6 +190,24 @@ export default Plugin.define({
         if (res.auth?.phase === 'ready' && res.auth?.wecom_configured) {
           ctx.toast.show({ title: ctx.t('toast.ready'), variant: 'success' });
         }
+      } catch (err) {
+        ctx.toast.show({
+          title: err instanceof Error ? err.message : String(err),
+          variant: 'error',
+        });
+      } finally {
+        setBusy(false);
+      }
+    };
+
+    const verifyWecom = async () => {
+      const rpc = getRpc();
+      if (!rpc) return;
+      setBusy(true);
+      try {
+        await rpc.verifyWecom({}, { signal: ctx.signal });
+        await refresh();
+        ctx.toast.show({ title: ctx.t('toast.auth_verified'), variant: 'success' });
       } catch (err) {
         ctx.toast.show({
           title: err instanceof Error ? err.message : String(err),
@@ -396,17 +419,28 @@ export default Plugin.define({
                           return ctx.t('row.wecom_auth.desc');
                         },
                         get children() {
-                          return createComponent(ctx.ui.Button, {
-                            onClick: () => {
-                              const url =
-                                snapshot()?.wecom_auth_url ??
-                                'https://www.workbuddy.cn/login/wecom-auth';
-                              ctx.system.openExternal(url);
-                            },
-                            get children() {
-                              return ctx.t('btn.open_wecom_auth');
-                            },
-                          });
+                          return [
+                            createComponent(ctx.ui.Button, {
+                              onClick: () => {
+                                const url =
+                                  snapshot()?.wecom_auth_url ??
+                                  'https://www.workbuddy.cn/login/wecom-auth';
+                                ctx.system.openExternal(url);
+                              },
+                              get children() {
+                                return ctx.t('btn.open_wecom_auth');
+                              },
+                            }),
+                            createComponent(ctx.ui.Button, {
+                              get busy() {
+                                return busy();
+                              },
+                              onClick: () => void verifyWecom(),
+                              get children() {
+                                return ctx.t('btn.verify_wecom_auth');
+                              },
+                            }),
+                          ];
                         },
                       }),
                       createComponent(ctx.ui.SettingsRow, {

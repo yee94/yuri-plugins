@@ -41,6 +41,10 @@ export const WecomRpc = Rpc.define({
       },
       output: anyObjectSchema,
     },
+    verifyWecom: {
+      input: emptyObjectSchema,
+      output: anyObjectSchema,
+    },
     logout: {
       input: emptyObjectSchema,
       output: anyObjectSchema,

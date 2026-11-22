@@ -25,23 +25,20 @@ export interface WecomPluginDeps {
 
 const EMBEDDED_SKILL_CONTENT = `---
 name: wecom-dayuan
-description: 使用 opencode-plugin-wecom 零客户端依赖地连接企业微信（WorkBuddy 扫码换票 + 大圆 A2A 只读群聊摘要 + 可选 @wecom/cli 办公域）。
+description: 通过大圆只读查询企业微信内部单聊、群聊、消息和近期工作进展；处理首次登录、任务追加授权和查询恢复。文档、日程等办公域按需走可选的企业微信 CLI。
 ---
 
 # 企业微信（WeCom / 大圆）使用规范
 
-## 1. 登录与凭据
-- 本插件**不需要**安装 WorkBuddy 桌面端或企业微信桌面端，只需要用手机企业微信扫码一次。
-- 调用查询前可先用 \`wecom_status\` 检查状态（零网络请求）。
-- 若未登录或遇到 \`LOGIN_REQUIRED\` / \`REFRESH_OUTCOME_UNKNOWN_LOGIN_REQUIRED\`，调用 \`wecom_login({ mode: "start" })\` 把 \`authorization_url\` 给用户，引导用户在浏览器打开并用手机企微扫码，随后调用 \`wecom_login({ mode: "wait", wait_seconds: 60 })\` 完成换票。
-- 若遇到 \`WECOM_AUTH_REQUIRED_OPEN_WECOM_LOGIN\`，说明企业微信应用尚未在云端授权，请引导用户打开 \`${WECOM_LOGIN_URL}\` 完成授权。
+## 1. 查询
+- 已登录时直接调用 \`wecom_read_start\`，无需每次扫码。按群名找群用 \`search_groups\`；有明确会话和问题用 \`read_chat\`（\`chat_name\`、\`question\`）；查近期工作或跨会话找消息用 \`search_messages\`（\`query\`、可选 \`time_range\`）。
+- 例如「我最近在做什么」：查最近 7 天我发出的消息和提到我的消息，汇总项目、进展和待办，请大圆注明会话和日期。拿到 \`task_id\` 后用 \`wecom_read_result\` 查同一任务，直到完成、失败或需要用户处理。仅 \`text_clarification\` 可用 \`wecom_read_reply\` 回复。
+- 回复时标明内容是大圆摘要，不是聊天原文。没有匹配就如实说明。为原查询保留稳定的 \`request_id\`；遇到 \`SUBMIT_OUTCOME_UNKNOWN\` 不要换 ID 重发。
 
-## 2. 大圆 A2A 只读边界
-- \`wecom_read_start\` / \`wecom_read_result\` / \`wecom_read_reply\` 仅支持只读查群、读群聊摘要和搜消息摘要。
-- **返回值是大圆生成的摘要（\`is_summary: true\`），不是逐字原始聊天记录**，请如实向用户说明。
-- 建议传稳定的 \`request_id\` 保证幂等；遇到 \`SUBMIT_OUTCOME_UNKNOWN\` 不要盲目重试同一请求。
-- 当任务返回 \`interaction_kind === "text_clarification"\` 时，可用 \`wecom_read_reply\` 补充澄清。
-- 当任务返回 \`interaction_kind === "approval_required"\` 时，**必须停下并告知用户在手机企业微信手动审批**，严禁尝试自动通过。
+## 2. 登录、追加授权与恢复
+- 未登录或 WorkBuddy 会话失效：调用 \`wecom_login({ mode: "start" })\`，**在面向用户的正文中贴出返回的 \`authorization_url\`**。请用户用同一企业账号在官方页面完成登录，确认后调用 \`wecom_login({ mode: "wait", wait_seconds: 60 })\`，再查询。不需要安装 WorkBuddy 或企业微信桌面端。
+- 若结果为 \`authorization_required\`，或报 \`WECOM_AUTH_REQUIRED_OPEN_WECOM_LOGIN\`，先停下。**每个受阻事项的正文都要附上该结果的授权地址**；优先原样使用 \`authorization_url\`，缺失时调用 \`wecom_login({ mode: "wecom_auth" })\` 获取。请用户确认后调用 \`wecom_login({ mode: "verify_wecom" })\` 验证。已有 \`task_id\` 就继续查询原任务；仅在明确未提交时，才用原参数和原 \`request_id\` 重试。验证仍不通过就说明原因，不循环要求扫码。
+- \`approval_required\` 是当前任务的审批卡，不是登录或应用追加授权。请用户在企业微信官方界面处理原审批卡；不要拿应用授权链接代替，也不要拼接或转发带审批票据的 deep link、用文本代批或切换通道绕过。
 
 ## 3. 结构化办公域（可选）
 - 若用户需要查文档、智能表格、日程、会议、邮件、微盘或通讯录，且已安装 \`@wecom/cli\`，可调用 \`wecom_cli\`（默认仅允许只读子命令）。
@@ -66,7 +63,9 @@ function formatErrorHint(err: unknown): string {
     case 'REFRESH_OUTCOME_UNKNOWN_LOGIN_REQUIRED':
       return `${code}: 上一次续期请求网络状态不确定，为避免重放一次性 refresh_token 已中止自动续期，请重新扫码登录。`;
     case 'WECOM_AUTH_REQUIRED_OPEN_WECOM_LOGIN':
-      return `${code}: WorkBuddy 账号已登录，但尚未完成企业微信应用授权。请在浏览器打开 ${WECOM_LOGIN_URL} 完成授权后重试。`;
+      return `${code}: 企业微信授权未完成或已失效。请用同一企业账号在官方页面 ${WECOM_LOGIN_URL} 确认，再运行 wecom_login({ mode: "verify_wecom" }) 检查。`;
+    case 'DAYUAN_NOT_AVAILABLE':
+      return `${code}: 当前账号的 WorkBuddy 服务未提供可用的大圆接口；请确认企业开通及账号权限。`;
     case 'ENTERPRISE_ACCOUNT_REQUIRED':
       return `${code}: 当前账号缺少企业 ID，请使用企业微信企业账号登录。`;
     case 'APPROVAL_INTERACTION_BLOCKED':
@@ -91,7 +90,26 @@ function formatTaskSummaryText(result: DayuanTaskResult): string {
   if (result.guidance) {
     lines.push('', `提示: ${result.guidance}`);
   }
+  if (result.authorization_url) {
+    lines.push('', `授权地址: ${result.authorization_url}`);
+  }
   return lines.join('\n');
+}
+
+function dayuanAuthorizationResult(err: unknown, taskId?: string) {
+  if (!(err instanceof WecomError) || err.code !== 'WECOM_AUTH_REQUIRED_OPEN_WECOM_LOGIN') {
+    throw new Error(formatErrorHint(err));
+  }
+  return {
+    output: {
+      ...(taskId ? { task_id: taskId } : {}),
+      state: 'auth_required',
+      interaction_kind: 'authorization_required',
+      human_action_required: true,
+      authorization_url: WECOM_LOGIN_URL,
+    },
+    content: formatErrorHint(err),
+  };
 }
 
 function formatStatusText(
@@ -121,6 +139,8 @@ const DAYUAN_TASK_RESULT_OUTPUT_SCHEMA = {
     summary: { type: 'string' },
     interaction_kind: { type: 'string' },
     guidance: { type: 'string' },
+    authorization_url: { type: 'string' },
+    human_action_required: { type: 'boolean' },
     raw_parts_count: { type: 'number' },
     from_cache: { type: 'boolean' },
   },
@@ -179,6 +199,13 @@ export function createWecomPlugin(deps?: WecomPluginDeps) {
         },
         async startLogin(_input, callCtx) {
           return auth.start({ signal: callCtx.signal });
+        },
+        async verifyWecom(_input, callCtx) {
+          try {
+            return { auth: await auth.verifyWecom(callCtx.signal) };
+          } catch (err) {
+            throw new Error(formatErrorHint(err));
+          }
         },
         async finishLogin(input, callCtx) {
           const raw = input as { wait_seconds?: number } | undefined;
@@ -280,9 +307,9 @@ export function createWecomPlugin(deps?: WecomPluginDeps) {
             properties: {
               mode: {
                 type: 'string',
-                enum: ['start', 'finish', 'wait', 'wecom_auth', 'logout'],
+                enum: ['start', 'finish', 'wait', 'wecom_auth', 'verify_wecom', 'logout'],
                 description:
-                  'start: create/reuse QR login URL; finish: single poll check; wait: poll until scan completes and exchange WeCom token; wecom_auth: return secondary WeCom authorization URL; logout: clear stored credentials.',
+                  'start: create/reuse QR login URL; finish: single poll check; wait: poll until scan completes and exchange WeCom token; wecom_auth: return official authorization URL; verify_wecom: recheck user authorization and Dayuan ticket after user confirmation; logout: clear stored credentials.',
               },
               wait_seconds: {
                 type: 'number',
@@ -307,7 +334,7 @@ export function createWecomPlugin(deps?: WecomPluginDeps) {
           options: { namespace: 'wecom', codemode: true },
           async execute(rawInput, toolCtx) {
             const input = (rawInput ?? {}) as {
-              mode?: 'start' | 'finish' | 'wait' | 'wecom_auth' | 'logout';
+              mode?: 'start' | 'finish' | 'wait' | 'wecom_auth' | 'verify_wecom' | 'logout';
               wait_seconds?: number;
             };
             const mode = input.mode ?? 'start';
@@ -317,6 +344,12 @@ export function createWecomPlugin(deps?: WecomPluginDeps) {
                 return {
                   output: info,
                   content: `请在浏览器打开以下企业微信应用授权链接并确认：\n${info.authorization_url}`,
+                };
+              }
+              if (mode === 'verify_wecom') {
+                return {
+                  output: { auth: await auth.verifyWecom(toolCtx.signal) },
+                  content: '企业微信授权和大圆专用票据已验证，尚未发起聊天查询。',
                 };
               }
               if (mode === 'logout') {
@@ -466,7 +499,7 @@ export function createWecomPlugin(deps?: WecomPluginDeps) {
                 content: formatTaskSummaryText(result),
               };
             } catch (err) {
-              throw new Error(formatErrorHint(err));
+              return dayuanAuthorizationResult(err);
             }
           },
         });
@@ -510,7 +543,7 @@ export function createWecomPlugin(deps?: WecomPluginDeps) {
                 content: formatTaskSummaryText(result),
               };
             } catch (err) {
-              throw new Error(formatErrorHint(err));
+              return dayuanAuthorizationResult(err, input.task_id);
             }
           },
         });
@@ -561,7 +594,7 @@ export function createWecomPlugin(deps?: WecomPluginDeps) {
                 content: formatTaskSummaryText(result),
               };
             } catch (err) {
-              throw new Error(formatErrorHint(err));
+              return dayuanAuthorizationResult(err, input.task_id);
             }
           },
         });

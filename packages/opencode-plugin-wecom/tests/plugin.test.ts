@@ -154,6 +154,17 @@ function makeToolContext() {
 }
 
 describe('opencode-plugin-wecom server plugin integration', () => {
+  const dayuanEndpoint = 'https://qyapi.weixin.qq.com/cgi-bin/a2a/api/v2';
+  const dayuanDiscovery = {
+    cards: [
+      {
+        name: '大圆',
+        supportedInterfaces: [{ url: dayuanEndpoint, protocolBinding: 'HTTP+JSON' }],
+      },
+    ],
+    credentials: [{ id: 'wecom-a2a', endpoint: dayuanEndpoint }],
+  };
+
   it('registers tools, commands, skill, and RPC handlers, and executes end-to-end login + Dayuan query', async () => {
     const clock = createFakeClock(1_700_000_000_000);
     let pollCount = 0;
@@ -185,16 +196,25 @@ describe('opencode-plugin-wecom server plugin integration', () => {
           },
         });
       }
-      if (req.url === 'https://qyapi.weixin.qq.com/cgi-bin/a2a/api/message:send') {
+      if (req.url.endsWith('/a2a/cards/self')) {
+        expect(req.headers.Authorization).toBe('Bearer wb_e2e');
+        expect(req.headers['X-Tenant-Id']).toBe('ent_e2e');
+        return jsonResponse(dayuanDiscovery);
+      }
+      if (req.url.endsWith('/a2a/credentials/wecom-a2a/tickets')) {
+        expect(req.headers.Authorization).toBe('Bearer wb_e2e');
+        return jsonResponse({ data: { ticket: 'dayuan_e2e', expires_in: 3600 } });
+      }
+      if (req.url === `${dayuanEndpoint}/message:send`) {
+        expect(req.headers.Authorization).toBe('Bearer dayuan_e2e');
+        expect(req.headers['X-User-Id']).toBe('u_e2e');
         return jsonResponse({
           id: 'task_e2e',
           contextId: 'ctx_e2e',
           status: { state: 'working' },
         });
       }
-      if (
-        req.url === 'https://qyapi.weixin.qq.com/cgi-bin/a2a/api/tasks/task_e2e?historyLength=0'
-      ) {
+      if (req.url === `${dayuanEndpoint}/tasks/task_e2e?historyLength=0`) {
         pollCount += 1;
         return jsonResponse({
           id: 'task_e2e',
@@ -320,6 +340,7 @@ describe('opencode-plugin-wecom server plugin integration', () => {
 
   it('respects enableCliTool=false, supports wecom_auth mode, /wecom-login command, and blocks approval replies', async () => {
     const clock = createFakeClock(1_700_000_000_000);
+    let userAuthorized = false;
     const { transport } = createFakeTransport((req) => {
       if (req.url.endsWith('/v2/plugin/auth/state?platform=workbuddy')) {
         return jsonResponse({
@@ -337,10 +358,15 @@ describe('opencode-plugin-wecom server plugin integration', () => {
         return jsonResponse({ code: 0, data: { uid: 'u_2', enterpriseId: 'ent_2' } });
       }
       if (req.url.endsWith('/console/enterprises/ent_2/oneid_openapi/exchange-wecom-token')) {
+        if (!userAuthorized) return jsonResponse({ code: 10111 }, 400);
         return jsonResponse({
           code: 0,
           data: { access_token: 'wc_2', alias_id: 'alice', src_tid: 'corp_2', expires_in: 7200 },
         });
+      }
+      if (req.url.endsWith('/a2a/cards/self')) return jsonResponse(dayuanDiscovery);
+      if (req.url.includes('/a2a/credentials/wecom-a2a/tickets')) {
+        return jsonResponse({ ticket: 'dayuan_2', expires_in: 3600 });
       }
       if (req.url.endsWith('/message:send')) {
         return jsonResponse({
@@ -382,7 +408,28 @@ describe('opencode-plugin-wecom server plugin integration', () => {
       ?.execute({ sessionID: 'ses_2', prompt: {}, delivery: 'queue' });
     expect(mock.synthetics[0]?.text).toContain('force_login_type=wecom');
 
-    await mock.tools.get('wecom_login')?.execute({ mode: 'finish' }, makeToolContext().context);
+    const login = mock.tools.get('wecom_login');
+    await expect(login?.execute({ mode: 'finish' }, makeToolContext().context)).rejects.toThrow(
+      'WECOM_AUTH_REQUIRED_OPEN_WECOM_LOGIN',
+    );
+    const blocked = await mock.tools
+      .get('wecom_read_start')
+      ?.execute(
+        { action: 'search_messages', query: '最近的工作', request_id: 'auth-before-submit' },
+        makeToolContext().context,
+      );
+    expect(blocked?.output).toMatchObject({
+      interaction_kind: 'authorization_required',
+      authorization_url: 'https://www.workbuddy.cn/login/wecom-auth',
+    });
+    expect(blocked?.output.task_id).toBeUndefined();
+    expect(blocked?.content).toContain('https://www.workbuddy.cn/login/wecom-auth');
+    userAuthorized = true;
+    const verified = await login?.execute({ mode: 'verify_wecom' }, makeToolContext().context);
+    expect(verified?.output.auth).toMatchObject({
+      wecom_configured: true,
+      dayuan_ticket_ready: true,
+    });
     const apvStart = await mock.tools
       .get('wecom_read_start')
       ?.execute(
