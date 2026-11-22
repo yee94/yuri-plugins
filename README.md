@@ -1,35 +1,52 @@
 # yuri-plugins
 
-Monorepo for plugins around [Yuri](https://github.com/yee94/yuri): each package under `packages/`
-is an independent npm package that Yuri loads as a GUI plugin.
+[![CI](https://github.com/yee94/yuri-plugins/actions/workflows/ci.yml/badge.svg)](https://github.com/yee94/yuri-plugins/actions/workflows/ci.yml)
+[![Release](https://github.com/yee94/yuri-plugins/actions/workflows/release.yml/badge.svg)](https://github.com/yee94/yuri-plugins/actions/workflows/release.yml)
 
-Yuri's shell owns the window; a plugin owns the content it registers. Plugins use the official
-`@opencode/plugin` 2.2.0 contract — no Yuri-specific entry point — and expose their GUI bundle
-through the `./gui-experimental` export in `package.json`.
+OpenCode V2 / [Yuri](https://github.com/yee94/yuri) 插件 Monorepo。`packages/` 下的每个子包都是独立发布到 npm 的标准 `@opencode/plugin` 插件包，支持单包多入口：
+
+- `.`：OpenCode Server 插件（Tools / Slash Commands / Skills / RPC）
+- `./rpc`：共享的 `@opencode/plugin/rpc` 契约定义
+- `./gui-experimental`：可选的 Yuri 桌面端 / Web 端 GUI 薄壳（单文件 CJS）
 
 ## Packages
 
-| Package | Purpose |
-| --- | --- |
-| [`yuri-plugin-hello`](packages/yuri-plugin-hello) | Starter template: theme, logo and style patch |
+| Package | npm | Description |
+| --- | --- | --- |
+| [`opencode-plugin-wecom`](packages/opencode-plugin-wecom) | [![npm](https://img.shields.io/npm/v/opencode-plugin-wecom.svg)](https://www.npmjs.com/package/opencode-plugin-wecom) | 零桌面客户端依赖的企业微信 / 大圆 A2A 只读插件（WorkBuddy 扫码换票、群聊摘要查询、可选 `@wecom/cli` 办公域桥接与 Yuri GUI 设置页） |
 
-## Workspace
+## 快速使用
+
+在 `~/.config/opencode/opencode.jsonc` 中添加所需插件包名即可：
+
+```jsonc
+{
+  "plugins": [
+    "opencode-plugin-wecom"
+  ]
+}
+```
+
+详细配置与工具说明请查看各子包的 README，例如 [`packages/opencode-plugin-wecom/README.md`](packages/opencode-plugin-wecom/README.md)。
+
+## 本地开发
+
+要求 Node.js `>= 22` 和 `pnpm@9`。
 
 ```sh
 pnpm install
-pnpm check   # lint, tests and package checks
-pnpm build   # build every package that has a build step
+pnpm check   # Biome lint + TypeScript 类型检查 + tsdown 构建 + Vitest 测试 + GUI CJS 语法校验
+pnpm build   # 仅构建所有子包
+pnpm test    # 仅运行单元测试
 ```
 
-Root tooling is private and never published: pnpm workspace, Biome, Vitest, tsdown and TypeScript.
-Each package owns its manifest, version, README, runtime and npm file list.
+## CI / CD 与发布流程
 
-Adding a plugin: copy `packages/yuri-plugin-hello`, rename the package, replace the contributions.
-Use a tsdown build only when the plugin actually needs TS/TSX or dependency bundling; the default
-is a directly authored `gui-experimental.cjs`, which needs no build step.
+- **持续集成**（[`.github/workflows/ci.yml`](.github/workflows/ci.yml)）：每次推送 `main` 或发起 PR 时自动执行 `pnpm install --frozen-lockfile`、`pnpm lint` 与 `pnpm -r check`。
+- **自动发布**（[`.github/workflows/release.yml`](.github/workflows/release.yml)）：使用仓库 Secret `NPM_TOKEN` 发布到 npmjs.org，支持两种触发方式：
+  1. **推送版本 Tag**：例如推送 `opencode-plugin-wecom@v0.1.0`（或总包标签 `v0.1.0`），流水线会先执行完整 `pnpm check`，校验版本未在 npm 发布后自动 `pnpm publish --access public` 并创建 GitHub Release。
+  2. **手动触发（`workflow_dispatch`）**：在 GitHub Actions 页面可手动指定子包名及 `dry_run` 模式进行试跑或补发。
 
-## References
+## License
 
-- Plugin authoring reference ships with Yuri:
-  `packages/web/server/lib/gui-customization/skill/` in the Yuri repository.
-- `docs/releasing.md` — versioning and publishing.
+[MIT](LICENSE)

@@ -1,0 +1,122 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - '*@v*'
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      package:
+        description: 'Optional package name to publish (empty = all publishable packages)'
+        required: false
+        default: ''
+      dry_run:
+        description: 'Run checks and npm publish --dry-run without publishing'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run full workspace checks
+        run: pnpm check
+
+      - name: Publish packages to npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          INPUT_PACKAGE: ${{ inputs.package }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          REF_NAME: ${{ github.ref_name }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+
+          target_pkg="${INPUT_PACKAGE:-}"
+          tag_version=""
+
+          if [ "$EVENT_NAME" = "push" ] && [[ "$REF_NAME" == *@v* ]]; then
+            target_pkg="${REF_NAME%@v*}"
+            tag_version="${REF_NAME#*@v}"
+          elif [ "$EVENT_NAME" = "push" ] && [[ "$REF_NAME" == v* ]]; then
+            tag_version="${REF_NAME#v}"
+          fi
+
+          published_any=0
+
+          for pkg_json in packages/*/package.json; do
+            pkg_dir="$(dirname "$pkg_json")"
+            pkg_name="$(node -p "require('./${pkg_json}').name")"
+            pkg_version="$(node -p "require('./${pkg_json}').version")"
+            pkg_private="$(node -p "Boolean(require('./${pkg_json}').private)")"
+
+            if [ "$pkg_private" = "true" ]; then
+              echo "Skipping private package: ${pkg_name}"
+              continue
+            fi
+
+            if [ -n "$target_pkg" ] && [ "$pkg_name" != "$target_pkg" ]; then
+              echo "Skipping non-target package: ${pkg_name}"
+              continue
+            fi
+
+            if [ -n "$tag_version" ] && [ "$pkg_version" != "$tag_version" ]; then
+              echo "::error::Tag version (${tag_version}) does not match ${pkg_name} package.json version (${pkg_version})"
+              exit 1
+            fi
+
+            if npm view "${pkg_name}@${pkg_version}" version >/dev/null 2>&1; then
+              echo "Package ${pkg_name}@${pkg_version} is already published on npm; skipping."
+              continue
+            fi
+
+            if [ "$DRY_RUN" = "true" ]; then
+              echo "Dry run publishing ${pkg_name}@${pkg_version}..."
+              pnpm --filter "$pkg_name" publish --access public --no-git-checks --dry-run
+            else
+              if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
+                echo "::error::NPM_TOKEN secret is not configured."
+                exit 1
+              fi
+              echo "Publishing ${pkg_name}@${pkg_version}..."
+              pnpm --filter "$pkg_name" publish --access public --no-git-checks
+              published_any=1
+            fi
+          done
+
+          if [ -n "$target_pkg" ] && [ "$published_any" -eq 0 ] && [ "$DRY_RUN" != "true" ]; then
+            echo "Note: target package ${target_pkg} was either already published or not matched."
+          fi
+
+      - name: Create GitHub Release
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if ! gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release create "${GITHUB_REF_NAME}" --generate-notes
+          fi

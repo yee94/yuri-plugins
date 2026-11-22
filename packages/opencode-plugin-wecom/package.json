@@ -1,0 +1,59 @@
+{
+  "name": "opencode-plugin-wecom",
+  "version": "0.1.0",
+  "description": "OpenCode V2 plugin for WeCom (Enterprise WeChat) via desktop-free WorkBuddy cloud auth, Dayuan A2A read-only queries, optional @wecom/cli bridge, and Yuri/Desktop GUI controls",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./rpc": {
+      "types": "./dist/rpc.d.ts",
+      "default": "./dist/rpc.js"
+    },
+    "./gui-experimental": "./dist/gui-experimental.cjs"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsdown",
+    "type-check": "tsc --noEmit",
+    "lint": "biome check src tests package.json tsconfig.json tsdown.config.ts",
+    "test": "vitest run",
+    "check": "pnpm lint && pnpm type-check && pnpm build && pnpm test && node --check dist/gui-experimental.cjs"
+  },
+  "dependencies": {
+    "@opencode/plugin": "^2.3.2"
+  },
+  "devDependencies": {
+    "solid-js": "^1.9.17"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yee94/yuri-plugins.git",
+    "directory": "packages/opencode-plugin-wecom"
+  },
+  "homepage": "https://github.com/yee94/yuri-plugins/tree/main/packages/opencode-plugin-wecom#readme",
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "yuri",
+    "yuri-plugin",
+    "wecom",
+    "workbuddy",
+    "dayuan",
+    "a2a"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  }
+}
