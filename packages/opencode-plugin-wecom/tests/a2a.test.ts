@@ -33,6 +33,160 @@ function createFakeAuthProvider(tokens: string[] = ['wc_tok_1']) {
 }
 
 describe('DayuanA2AClient — read-only queries, polling, and caching', () => {
+  it('submits a fixed self-send test once and labels it as a write result', async () => {
+    const { transport, requests } = createFakeTransport((req) => {
+      const text = JSON.parse(req.body ?? '{}').message.parts[0].text;
+      expect(text).toContain('只给当前登录用户（我自己）');
+      expect(text).toMatch(/\nOpenCode 企业微信自发测试 smoke-1$/);
+      return jsonResponse({ id: 'task_self', status: { state: 'completed' } });
+    });
+    const client = new DayuanA2AClient({
+      auth: createFakeAuthProvider(),
+      storage: createMemoryStorage(),
+      clock: createFakeClock(),
+      transport,
+    });
+    await expect(client.testSendSelf('bad:id')).rejects.toThrow('INVALID_REQUEST_ID');
+    expect(await client.testSendSelf('smoke-1')).toMatchObject({
+      state: 'completed',
+      is_summary: false,
+    });
+    expect(await client.testSendSelf('smoke-1')).toMatchObject({ from_cache: true });
+    expect(requests).toHaveLength(1);
+  });
+
+  it('cancels an existing task through the WorkBuddy REST binding without a body', async () => {
+    const { transport, requests } = createFakeTransport((req) => {
+      if (req.url.endsWith('/message:send')) {
+        return jsonResponse({
+          id: 'task_cancel',
+          contextId: 'ctx_cancel',
+          status: { state: 'working' },
+        });
+      }
+      expect(req.method).toBe('POST');
+      expect(req.url).toContain('/tasks/task_cancel:cancel');
+      expect(req.body).toBeUndefined();
+      return jsonResponse({
+        id: 'task_cancel',
+        contextId: 'ctx_cancel',
+        status: { state: 'canceled' },
+      });
+    });
+    const client = new DayuanA2AClient({
+      auth: createFakeAuthProvider(),
+      storage: createMemoryStorage(),
+      clock: createFakeClock(),
+      transport,
+    });
+    await client.start({
+      action: 'search_groups',
+      query: '项目',
+      request_id: 'cancel-1',
+      wait_seconds: 0,
+    });
+    expect(await client.cancelTask('task_cancel')).toMatchObject({
+      task_id: 'task_cancel',
+      request_id: 'cancel-1',
+      state: 'canceled',
+      completed: true,
+    });
+    expect(requests).toHaveLength(2);
+  });
+
+  it('sends exact-target internal messages with WorkBuddy file parts and idempotency', async () => {
+    const { transport, requests } = createFakeTransport((req) => {
+      const body = JSON.parse(req.body ?? '{}');
+      expect(body.configuration).toEqual({ returnImmediately: true });
+      expect(body.message.parts[0].text).toContain('内部单聊');
+      expect(body.message.parts[0].text).toContain('完全匹配且唯一');
+      expect(body.message.parts[1]).toEqual({
+        url: 'https://example.com/report.pdf',
+        filename: 'report.pdf',
+        mediaType: 'application/pdf',
+      });
+      return jsonResponse({ id: 'task_send', status: { state: 'completed' } });
+    });
+    const client = new DayuanA2AClient({
+      auth: createFakeAuthProvider(),
+      storage: createMemoryStorage(),
+      clock: createFakeClock(),
+      transport,
+    });
+    const input = {
+      target_type: 'single',
+      target_name: '张三',
+      text: '请查收附件',
+      attachments: [
+        {
+          url: 'https://example.com/report.pdf',
+          filename: 'report.pdf',
+          media_type: 'application/pdf',
+        },
+      ],
+      request_id: 'send-1',
+    } as const;
+    expect(await client.sendMessage(input)).toMatchObject({
+      action: 'send_message',
+      state: 'completed',
+      is_summary: false,
+    });
+    expect(await client.sendMessage(input)).toMatchObject({ from_cache: true });
+    expect(requests).toHaveLength(1);
+    await expect(client.sendMessage({ ...input, target_name: '李四' })).rejects.toThrow(
+      'REQUEST_ID_CONFLICT',
+    );
+    await expect(
+      client.sendMessage({ ...input, request_id: 'send-2', attachments: [{ url: 'http://x' }] }),
+    ).rejects.toThrow('INVALID_ATTACHMENT_URL');
+  });
+
+  it('creates only an exact-member internal group', async () => {
+    const { transport, requests } = createFakeTransport((req) => {
+      const text = JSON.parse(req.body ?? '{}').message.parts[0].text;
+      expect(text).toContain('"项目联调群"');
+      expect(text).toContain('["张三","李四"]');
+      expect(text).toContain('外部联系人');
+      return jsonResponse({ id: 'task_group', status: { state: 'completed' } });
+    });
+    const client = new DayuanA2AClient({
+      auth: createFakeAuthProvider(),
+      storage: createMemoryStorage(),
+      clock: createFakeClock(),
+      transport,
+    });
+    expect(
+      await client.createGroup({
+        group_name: '项目联调群',
+        members: ['张三', '李四', '张三'],
+        request_id: 'group-1',
+      }),
+    ).toMatchObject({ action: 'create_group', state: 'completed', is_summary: false });
+    expect(requests).toHaveLength(1);
+  });
+
+  it.each([
+    ['find_mentions', undefined, '明确 @ 当前用户'],
+    ['triage_unread', undefined, '不要标记已读'],
+    ['find_chat_files', undefined, '实际分享过的文件'],
+    ['find_chat_contacts', '入口协议', '内部联系人'],
+  ] as const)('uses a dedicated read-only prompt for %s', async (action, query, expected) => {
+    const { transport } = createFakeTransport((req) => {
+      const text = JSON.parse(req.body ?? '{}').message.parts[0].text;
+      expect(text).toContain(expected);
+      expect(text).toContain('不要发送任何消息或执行写操作');
+      if (query) expect(text).toContain(query);
+      return jsonResponse({ id: 'task_test', status: { state: 'completed' } });
+    });
+    const client = new DayuanA2AClient({
+      auth: createFakeAuthProvider(),
+      storage: createMemoryStorage(),
+      clock: createFakeClock(),
+      transport,
+    });
+    expect(await client.start({ action, query })).toMatchObject({ state: 'completed', action });
+  });
+
   it('pauses on additional authorization and resumes the same task without submitting again', async () => {
     const { transport, requests } = createFakeTransport((req) =>
       jsonResponse({
@@ -349,6 +503,9 @@ describe('DayuanA2AClient — idempotency, token refresh retry, and approval gua
 
     const { transport, requests } = createFakeTransport((req) => {
       const body = req.body ? JSON.parse(req.body) : undefined;
+      if (req.method === 'GET' && req.url.includes('/tasks/task_clarify')) {
+        return jsonResponse({ id: 'task_clarify', status: { state: 'completed' } });
+      }
       if (body?.message?.taskId === 'task_clarify') {
         expect(body.message.contextId).toBe('ctx_clarify');
         return jsonResponse({
@@ -422,6 +579,11 @@ describe('DayuanA2AClient — idempotency, token refresh retry, and approval gua
       'APPROVAL_INTERACTION_BLOCKED',
     );
     expect(requests).toHaveLength(reqCountBeforeBlockedReply);
+
+    await expect(client.getApprovalUrl('task_approval')).resolves.toBe(
+      'wxwork://jump?target=agent_confirm&token=apv_999',
+    );
+    await expect(client.getApprovalUrl('task_clarify')).rejects.toThrow('APPROVAL_NOT_AVAILABLE');
   });
 
   it('lists recent receipts newest-first without exposing credentials', async () => {

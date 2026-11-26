@@ -1,13 +1,6 @@
-import {
-  Command,
-  type Context,
-  type IconName,
-  Plugin,
-  type ServerRef,
-  SettingsPage,
-  TitlebarItem,
-} from '@opencode/plugin/gui';
+import { Command, Plugin, SettingsPage } from '@opencode/plugin/gui';
 import { createComponent, createSignal } from 'solid-js';
+import { startNativeApprovalServer } from './native-approval.js';
 import { WecomRpc } from './rpc.js';
 
 interface WecomStatusSnapshot {
@@ -19,28 +12,12 @@ interface WecomStatusSnapshot {
     readonly wecom_expires_at_ms: number | null;
   };
   readonly wecom_auth_url: string;
-  readonly cli: {
-    readonly available: boolean;
-    readonly binary: string;
-    readonly version?: string;
-  };
   readonly recent_receipts: readonly {
     readonly request_id: string;
     readonly action: string;
     readonly status: string;
     readonly summary_preview?: string;
   }[];
-}
-
-function activeServer(ctx: Context): ServerRef | undefined {
-  const sessionServer = ctx.sessions.current()?.server;
-  if (sessionServer?.connected) return sessionServer;
-  for (const id of ctx.servers.list()) {
-    const ref = ctx.servers.get(id);
-    if (ref?.connected) return ref;
-  }
-  const firstId = ctx.servers.list()[0];
-  return firstId ? ctx.servers.get(firstId) : undefined;
 }
 
 export default Plugin.define({
@@ -54,7 +31,6 @@ export default Plugin.define({
       'cmd.settings': 'WeCom: Open settings',
       'section.connection': 'Connection',
       'section.actions': 'Actions',
-      'section.office': 'Optional @wecom/cli',
       'section.receipts': 'Recent Dayuan Queries',
       'row.status': 'Auth Status',
       'row.login': 'QR Code Login',
@@ -80,8 +56,6 @@ export default Plugin.define({
       'state.connected': 'Connected (WeCom ready)',
       'state.pending': 'Waiting for QR scan...',
       'state.logged_out': 'Not signed in',
-      'cli.available': 'Installed',
-      'cli.missing': 'Not installed (optional; Dayuan A2A works without it)',
       'receipts.empty': 'No recent Dayuan queries yet.',
     },
     zh: {
@@ -92,7 +66,6 @@ export default Plugin.define({
       'cmd.settings': '企业微信：打开设置',
       'section.connection': '连接状态',
       'section.actions': '登录与凭据操作',
-      'section.office': '可选 @wecom/cli 办公域',
       'section.receipts': '近期大圆查询回执',
       'row.status': '当前状态',
       'row.login': '手机企微扫码登录',
@@ -117,8 +90,6 @@ export default Plugin.define({
       'state.connected': '已连接（企微凭据就绪）',
       'state.pending': '等待手机企微扫码...',
       'state.logged_out': '未登录',
-      'cli.available': '已安装',
-      'cli.missing': '未安装（可选，不影响大圆 A2A 查群）',
       'receipts.empty': '暂无近期大圆查询记录。',
     },
   },
@@ -127,10 +98,7 @@ export default Plugin.define({
     const [busy, setBusy] = createSignal(false);
     const [lastAuthUrl, setLastAuthUrl] = createSignal<string | undefined>(undefined);
 
-    const getRpc = () => {
-      const server = activeServer(ctx);
-      return server ? server.client.rpc(WecomRpc) : undefined;
-    };
+    const getRpc = () => ctx.client.rpc(WecomRpc);
 
     const refresh = async () => {
       const rpc = getRpc();
@@ -265,23 +233,6 @@ export default Plugin.define({
           ctx.layout.settings(ctx.id);
         },
       }),
-      ctx.add(TitlebarItem, () => {
-        const snap = snapshot();
-        const ready = snap?.auth.phase === 'ready' && snap?.auth.wecom_configured;
-        const pending =
-          snap?.auth.phase === 'pending_token' || snap?.auth.phase === 'pending_account';
-        const icon: IconName = ready ? 'circle-check' : 'bubble-5';
-        return {
-          id: 'wecom-status',
-          label: ready ? 'WeCom ✓' : pending ? 'WeCom …' : 'WeCom',
-          title: ctx.t('title'),
-          icon,
-          busy: busy(),
-          run: () => {
-            ctx.layout.settings(ctx.id);
-          },
-        };
-      }),
       ctx.add(SettingsPage, {
         id: ctx.id,
         get title() {
@@ -303,14 +254,6 @@ export default Plugin.define({
               return ctx.t('state.pending');
             }
             return `${ctx.t('state.logged_out')} (${snap.auth.phase})`;
-          };
-
-          const cliLabel = () => {
-            const snap = snapshot();
-            if (snap?.cli.available) {
-              return `${ctx.t('cli.available')} (${snap.cli.version ?? 'ok'})`;
-            }
-            return ctx.t('cli.missing');
           };
 
           const receiptsDescription = () => {
@@ -358,15 +301,6 @@ export default Plugin.define({
                         },
                         get description() {
                           return statusLabel();
-                        },
-                      }),
-                      createComponent(ctx.ui.SettingsRow, {
-                        id: 'wecom.cli',
-                        get title() {
-                          return ctx.t('section.office');
-                        },
-                        get description() {
-                          return cliLabel();
                         },
                       }),
                     ];
@@ -492,5 +426,22 @@ export default Plugin.define({
       unsubAuth?.();
       for (const cleanup of cleanups) cleanup();
     };
+  },
+  main(ctx) {
+    if (ctx.options.write !== true || process.platform !== 'darwin') return;
+    return startNativeApprovalServer({
+      appVersion: ctx.app.version,
+      autoConfirm: true,
+      position: () => {
+        const window = ctx.windows.focused() ?? ctx.windows.list()[0];
+        const bounds = window?.getBounds();
+        return bounds
+          ? {
+              x: bounds.x + Math.round(bounds.width / 2),
+              y: bounds.y + Math.round(bounds.height / 2),
+            }
+          : undefined;
+      },
+    });
   },
 });

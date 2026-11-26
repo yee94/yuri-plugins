@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { Command, type Context, SettingsPage, TitlebarItem } from '@opencode/plugin/gui';
+import { Command, type Context, SettingsPage } from '@opencode/plugin/gui';
 import { describe, expect, it, vi } from 'vitest';
 import guiPlugin from '../src/gui.js';
 import { WecomRpc } from '../src/rpc.js';
@@ -25,7 +25,6 @@ function createMockGuiContext() {
         authorization_verified: false,
       },
       wecom_auth_url: 'https://www.workbuddy.cn/login/wecom-auth',
-      cli: { available: false, binary: 'wecom' },
       recent_receipts: [],
     })),
     startLogin: vi.fn(async () => ({
@@ -70,6 +69,7 @@ function createMockGuiContext() {
   const ctx = {
     id: 'opencode-plugin-wecom',
     signal: new AbortController().signal,
+    client: serverRef.client,
     t: (key: string) => key,
     add: (registry: { id: string }, item: unknown) => {
       const list = contributions.get(registry.id) ?? [];
@@ -116,7 +116,7 @@ function createMockGuiContext() {
 }
 
 describe('opencode-plugin-wecom GUI thin shell', () => {
-  it('defines i18n copy and synchronous setup that registers commands, titlebar item, and settings page', async () => {
+  it('defines i18n copy and synchronous setup that registers commands and settings page', async () => {
     expect(guiPlugin.i18n?.en).toBeDefined();
     expect(guiPlugin.i18n?.zh).toBeDefined();
     expect(typeof guiPlugin.setup).toBe('function');
@@ -131,13 +131,11 @@ describe('opencode-plugin-wecom GUI thin shell', () => {
       id: string;
       run: () => Promise<void> | void;
     }[];
-    const titlebar = (mock.contributions.get(TitlebarItem.id) ?? []) as unknown[];
     const settingsPages = (mock.contributions.get(SettingsPage.id) ?? []) as {
       render: (input: Record<string, unknown>) => unknown;
     }[];
 
     expect(commands.length).toBeGreaterThanOrEqual(2);
-    expect(titlebar).toHaveLength(1);
     expect(settingsPages).toHaveLength(1);
 
     // Trigger QR login command -> invokes server RPC startLogin and opens browser
@@ -164,7 +162,16 @@ describe('opencode-plugin-wecom GUI thin shell', () => {
     if (!existsSync(bundlePath)) return;
     const source = readFileSync(bundlePath, 'utf8');
     const requires = [...source.matchAll(/require\(["']([^"']+)["']\)/g)].map((m) => m[1]);
-    const allowed = new Set(['@opencode/plugin/gui', '@opencode/plugin/rpc', 'solid-js']);
+    const allowed = new Set([
+      '@opencode/plugin/gui',
+      '@opencode/plugin/rpc',
+      'solid-js',
+      'node:fs',
+      'node:module',
+      'node:net',
+      'node:os',
+      'node:path',
+    ]);
     expect(requires.length).toBeGreaterThan(0);
     for (const specifier of requires) {
       expect(allowed.has(specifier ?? '')).toBe(true);

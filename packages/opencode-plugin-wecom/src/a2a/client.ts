@@ -22,7 +22,24 @@ const DEFAULT_WAIT_SECONDS = 20;
 const SAFE_ID_RE = /^[A-Za-z0-9_.:-]{1,128}$/;
 const TOKEN_EXPIRED_ERRCODES = new Set([40001, 40014, 42001]);
 
-export type DayuanAction = 'search_groups' | 'read_chat' | 'search_messages';
+export const DAYUAN_READ_INSTRUCTIONS = {
+  search_messages: '检索匹配的历史消息并给出要点。',
+  find_mentions: '只查明确 @ 当前用户的消息，排除 @所有人，按会话和日期汇总。',
+  triage_unread:
+    '读取当前未读状态，将未读会话分为需处理、值得关注、其他。无法核实未读状态就明确说明，不要用历史消息代替，也不要标记已读。',
+  find_chat_files:
+    '只找聊天中实际分享过的文件或在线文档，列出可确认的标题、会话和分享日期，不要猜测文件名或链接。',
+  find_chat_contacts:
+    '按聊天上下文查找与条件匹配的内部联系人，给出可读名称和来源会话，不返回联系方式或内部 ID。',
+} as const;
+
+export type DayuanAction = 'search_groups' | 'read_chat' | keyof typeof DAYUAN_READ_INSTRUCTIONS;
+type DayuanTaskAction =
+  | DayuanAction
+  | 'test_send_self'
+  | 'send_self'
+  | 'send_message'
+  | 'create_group';
 
 export type A2ATaskState =
   | 'submitted'
@@ -60,8 +77,8 @@ export interface ReadChatInput {
 }
 
 export interface SearchMessagesInput {
-  readonly action: 'search_messages';
-  readonly query: string;
+  readonly action: keyof typeof DAYUAN_READ_INSTRUCTIONS;
+  readonly query?: string;
   readonly chat_name?: string;
   readonly time_range?: string;
   readonly request_id?: string;
@@ -69,6 +86,28 @@ export interface SearchMessagesInput {
 }
 
 export type DayuanReadStartInput = SearchGroupsInput | ReadChatInput | SearchMessagesInput;
+
+export interface DayuanAttachment {
+  readonly url: string;
+  readonly filename?: string;
+  readonly media_type?: string;
+}
+
+export interface DayuanSendMessageInput {
+  readonly target_type: 'self' | 'single' | 'group';
+  readonly target_name?: string;
+  readonly text: string;
+  readonly attachments?: readonly DayuanAttachment[];
+  readonly request_id: string;
+  readonly wait_seconds?: number;
+}
+
+export interface DayuanCreateGroupInput {
+  readonly group_name: string;
+  readonly members: readonly string[];
+  readonly request_id: string;
+  readonly wait_seconds?: number;
+}
 
 export interface DayuanReadResultInput {
   readonly task_id: string;
@@ -97,10 +136,10 @@ export interface DayuanTaskResult {
   readonly task_id: string;
   readonly context_id?: string;
   readonly request_id?: string;
-  readonly action?: DayuanAction;
+  readonly action?: DayuanTaskAction;
   readonly state: A2ATaskState;
   readonly completed: boolean;
-  readonly is_summary: true;
+  readonly is_summary: boolean;
   readonly summary: string;
   readonly interaction_kind: InteractionKind;
   readonly can_reply_in_text: boolean;
@@ -113,7 +152,7 @@ export interface DayuanTaskResult {
 
 export interface DayuanReceiptSummary {
   readonly request_id: string;
-  readonly action: DayuanAction;
+  readonly action: DayuanTaskAction;
   readonly status: 'submit_unknown' | A2ATaskState;
   readonly task_id?: string;
   readonly summary_preview?: string;
@@ -123,7 +162,7 @@ export interface DayuanReceiptSummary {
 interface StoredReceipt {
   request_id: string;
   identity: string;
-  action: DayuanAction;
+  action: DayuanTaskAction;
   fingerprint: string;
   status: 'submit_unknown' | A2ATaskState;
   task_id?: string;
@@ -137,7 +176,7 @@ interface StoredTaskRecord {
   task_id: string;
   context_id?: string;
   identity: string;
-  action?: DayuanAction;
+  action?: DayuanTaskAction;
   request_id?: string;
   result: DayuanTaskResult;
 }
@@ -171,6 +210,37 @@ function cleanText(value: unknown, field: string, maxLength = 2000): string {
 function cleanOptionalText(value: unknown, field: string, maxLength = 500): string | undefined {
   if (value === undefined || value === null || value === '') return undefined;
   return cleanText(value, field, maxLength);
+}
+
+function cleanAttachments(value: readonly DayuanAttachment[] | undefined): DayuanAttachment[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > 10) throw new WecomError('INVALID_ATTACHMENTS', true);
+  return value.map((attachment) => {
+    if (!attachment || typeof attachment !== 'object') {
+      throw new WecomError('INVALID_ATTACHMENTS', true);
+    }
+    const rawUrl = cleanText(attachment.url, 'attachment_url', 2048);
+    let url: URL;
+    try {
+      url = new URL(rawUrl);
+    } catch {
+      throw new WecomError('INVALID_ATTACHMENT_URL', true);
+    }
+    if (url.protocol !== 'https:' || url.username || url.password) {
+      throw new WecomError('INVALID_ATTACHMENT_URL', true);
+    }
+    const mediaType = attachment.media_type?.trim();
+    if (mediaType && !/^[A-Za-z0-9.+-]+\/[A-Za-z0-9.+-]+$/.test(mediaType)) {
+      throw new WecomError('INVALID_ATTACHMENT_MEDIA_TYPE', true);
+    }
+    return {
+      url: url.toString(),
+      ...(attachment.filename
+        ? { filename: cleanText(attachment.filename, 'attachment_filename', 255) }
+        : {}),
+      ...(mediaType ? { media_type: mediaType } : {}),
+    };
+  });
 }
 
 function assertSafeId(value: string, field: string): string {
@@ -321,7 +391,7 @@ function buildReadOnlyPrompt(input: DayuanReadStartInput): {
     const timeRange = cleanOptionalText(input.time_range, 'time_range', 200);
     const timeClause = timeRange ? `（时间范围：${timeRange}）` : '';
     return {
-      prompt: `只读查询：请阅读企业微信群聊「${chatName}」${timeClause}，回答以下问题并给出要点摘要：${question}。不要发送任何消息或执行写操作。`,
+      prompt: `只读查询：请阅读企业微信内部会话「${chatName}」${timeClause}，回答以下问题并给出要点摘要：${question}。不要发送任何消息或执行写操作。`,
       canonical: {
         action: input.action,
         chat_name: chatName,
@@ -330,21 +400,24 @@ function buildReadOnlyPrompt(input: DayuanReadStartInput): {
       },
     };
   }
-  const query = cleanText(input.query, 'query', 1000);
+  const query =
+    input.action === 'search_messages' || input.action === 'find_chat_contacts'
+      ? cleanText(input.query, 'query', 1000)
+      : cleanOptionalText(input.query, 'query', 1000);
   const chatName = cleanOptionalText(input.chat_name, 'chat_name', 300);
   const timeRange = cleanOptionalText(input.time_range, 'time_range', 200);
   const scope = [
-    chatName ? `限定群聊「${chatName}」` : null,
+    chatName ? `限定会话「${chatName}」` : null,
     timeRange ? `时间范围：${timeRange}` : null,
   ]
     .filter(Boolean)
     .join('，');
   const scopeClause = scope ? `（${scope}）` : '';
   return {
-    prompt: `只读查询：请在企业微信消息中检索与「${query}」相关的内容${scopeClause}，汇总相关讨论结论与来源群名。不要发送任何消息或执行写操作。`,
+    prompt: `只读查询：请在企业微信中处理下列任务${scopeClause}：${DAYUAN_READ_INSTRUCTIONS[input.action]}${query ? ` 检索条件：${query}。` : ''} 注明来源会话和日期，没有匹配就如实说明。不要发送任何消息或执行写操作。`,
     canonical: {
       action: input.action,
-      query,
+      query: query ?? null,
       chat_name: chatName ?? null,
       time_range: timeRange ?? null,
     },
@@ -357,12 +430,15 @@ function fingerprintOf(canonical: Record<string, unknown>): string {
 
 function buildWhitelistedUrl(
   endpoint: string,
-  route: { kind: 'send' } | { kind: 'task'; taskId: string },
+  route: { kind: 'send' } | { kind: 'task' | 'cancel'; taskId: string },
 ): string {
   if (route.kind === 'send') {
     return `${endpoint}/message:send`;
   }
   const safeId = assertSafeId(route.taskId, 'task_id');
+  if (route.kind === 'cancel') {
+    return `${endpoint}/tasks/${encodeURIComponent(safeId)}:cancel`;
+  }
   return `${endpoint}/tasks/${encodeURIComponent(safeId)}?historyLength=0`;
 }
 
@@ -390,7 +466,7 @@ export class DayuanA2AClient {
 
   private parseTaskPayload(
     raw: Record<string, unknown>,
-    meta: { request_id?: string; action?: DayuanAction; from_cache: boolean },
+    meta: { request_id?: string; action?: DayuanTaskAction; from_cache: boolean },
   ): DayuanTaskResult {
     const taskObj = asRecord(raw.result) ?? asRecord(raw.task) ?? raw;
     const rawId = taskObj.id ?? taskObj.taskId ?? raw.id;
@@ -415,7 +491,8 @@ export class DayuanA2AClient {
     if (approval) {
       interactionKind = 'approval_required';
       humanActionRequired = true;
-      guidance = '请本人在企业微信官方界面处理原审批卡，完成后查询原任务状态。';
+      guidance =
+        '本机 macOS 调用 wecom_open_approval 处理原审批卡；启用自动确认后无需人工点击。随后查询原任务状态；其他环境请本人在企业微信官方界面处理。';
     } else if (state === 'auth_required') {
       interactionKind = 'authorization_required';
       humanActionRequired = true;
@@ -442,7 +519,11 @@ export class DayuanA2AClient {
       ...(meta.action ? { action: meta.action } : {}),
       state,
       completed: isTerminalState(state),
-      is_summary: true,
+      is_summary:
+        meta.action !== 'test_send_self' &&
+        meta.action !== 'send_self' &&
+        meta.action !== 'send_message' &&
+        meta.action !== 'create_group',
       summary,
       interaction_kind: interactionKind,
       can_reply_in_text: canReplyInText,
@@ -458,7 +539,7 @@ export class DayuanA2AClient {
 
   private async requestA2A(options: {
     method: 'GET' | 'POST';
-    route: { kind: 'send' } | { kind: 'task'; taskId: string };
+    route: { kind: 'send' } | { kind: 'task' | 'cancel'; taskId: string };
     body?: Record<string, unknown>;
     signal?: AbortSignal;
     allowAuthRetry?: boolean;
@@ -478,8 +559,8 @@ export class DayuanA2AClient {
         Authorization: `Bearer ${ticket.access_token}`,
       };
       let serialized: string | undefined;
-      if (options.method === 'POST') {
-        serialized = JSON.stringify(options.body ?? {});
+      if (options.method === 'POST' && options.body !== undefined) {
+        serialized = JSON.stringify(options.body);
       }
       const response = await this.transport({
         method: options.method,
@@ -625,7 +706,95 @@ export class DayuanA2AClient {
   }
 
   async start(input: DayuanReadStartInput, options?: DayuanCallOptions): Promise<DayuanTaskResult> {
-    const { prompt, canonical } = buildReadOnlyPrompt(input);
+    return this.submit(input, buildReadOnlyPrompt(input), options);
+  }
+
+  async sendMessage(
+    input: DayuanSendMessageInput,
+    options?: DayuanCallOptions,
+  ): Promise<DayuanTaskResult> {
+    const id = assertSafeId(input.request_id, 'request_id');
+    if (!/^[a-zA-Z0-9-]{1,48}$/.test(id)) throw new WecomError('INVALID_REQUEST_ID', true);
+    if (!['self', 'single', 'group'].includes(input.target_type)) {
+      throw new WecomError('INVALID_TARGET_TYPE', true);
+    }
+    if (input.target_type === 'self' && input.target_name !== undefined) {
+      throw new WecomError('INVALID_TARGET_NAME', true);
+    }
+    const targetName =
+      input.target_type === 'self' ? undefined : cleanText(input.target_name, 'target_name', 300);
+    const text = cleanText(input.text, 'text', 20_000);
+    const attachments = cleanAttachments(input.attachments);
+    const action = input.target_type === 'self' ? 'send_self' : 'send_message';
+    const targetInstruction =
+      input.target_type === 'self'
+        ? '只给当前登录用户（我自己）发送。不要发送给其他人或任何群。若无法确定本人身份，停止，不要发送。'
+        : input.target_type === 'single'
+          ? `只给企业微信内部单聊中名称与 ${JSON.stringify(targetName)} 完全匹配且唯一的联系人发送。找不到、存在多个匹配、目标是外部联系人或身份不确定时，停止，不要发送。`
+          : `只给企业微信内部群中名称与 ${JSON.stringify(targetName)} 完全匹配且唯一的群发送。找不到、存在多个匹配、包含外部联系人或目标不确定时，停止，不要发送。`;
+    return this.submit(
+      { action, request_id: id, wait_seconds: input.wait_seconds },
+      {
+        prompt: `请在企业微信中发送一条消息。${targetInstruction}不支持的外部会话、@提醒、卡片或批量发送不要尝试。消息文本原样如下：\n${text}${attachments.length ? `\n附件共 ${attachments.length} 个，使用消息中的 file parts，不要改发其他文件。` : ''}`,
+        canonical: {
+          action,
+          target_type: input.target_type,
+          target_name: targetName ?? null,
+          text,
+          attachments,
+        },
+        attachments,
+      },
+      options,
+    );
+  }
+
+  async createGroup(
+    input: DayuanCreateGroupInput,
+    options?: DayuanCallOptions,
+  ): Promise<DayuanTaskResult> {
+    const id = assertSafeId(input.request_id, 'request_id');
+    if (!/^[a-zA-Z0-9-]{1,48}$/.test(id)) throw new WecomError('INVALID_REQUEST_ID', true);
+    const groupName = cleanText(input.group_name, 'group_name', 300);
+    if (!Array.isArray(input.members) || input.members.length === 0 || input.members.length > 50) {
+      throw new WecomError('INVALID_GROUP_MEMBERS', true);
+    }
+    const members = [
+      ...new Set(input.members.map((member) => cleanText(member, 'group_member', 300))),
+    ];
+    return this.submit(
+      { action: 'create_group', request_id: id, wait_seconds: input.wait_seconds },
+      {
+        prompt: `请创建一个企业微信内部群，群名原样为 ${JSON.stringify(groupName)}，成员仅限 ${JSON.stringify(members)}。只添加名称完全匹配且唯一的企业内部成员；任何成员找不到、存在多个匹配或属于外部联系人时停止，不要建群。不要添加其他成员，不要额外发送消息。`,
+        canonical: { action: 'create_group', group_name: groupName, members },
+      },
+      options,
+    );
+  }
+
+  async testSendSelf(requestId: string, options?: DayuanCallOptions): Promise<DayuanTaskResult> {
+    const id = assertSafeId(requestId, 'request_id');
+    if (!/^[a-zA-Z0-9-]{1,48}$/.test(id)) throw new WecomError('INVALID_REQUEST_ID', true);
+    const text = `OpenCode 企业微信自发测试 ${id}`;
+    return this.submit(
+      { action: 'test_send_self', request_id: id, wait_seconds: 0 },
+      {
+        prompt: `请只给当前登录用户（我自己）发送一条文本消息。不要发送给其他人或任何群。若无法确定本人身份，停止，不要发送。消息内容原样如下：\n${text}`,
+        canonical: { action: 'test_send_self', text },
+      },
+      options,
+    );
+  }
+
+  private async submit(
+    input: { action: DayuanTaskAction; request_id?: string; wait_seconds?: number },
+    {
+      prompt,
+      canonical,
+      attachments = [],
+    }: ReturnType<typeof buildReadOnlyPrompt> & { attachments?: DayuanAttachment[] },
+    options?: DayuanCallOptions,
+  ): Promise<DayuanTaskResult> {
     const requestId = input.request_id
       ? assertSafeId(input.request_id, 'request_id')
       : randomUUID();
@@ -687,10 +856,18 @@ export class DayuanA2AClient {
           expectedIdentity: credential.identity,
           route: { kind: 'send' },
           body: {
+            configuration: { returnImmediately: true },
             message: {
               messageId: requestId,
               role: 'ROLE_USER',
-              parts: [{ text: prompt }],
+              parts: [
+                { text: prompt },
+                ...attachments.map((attachment) => ({
+                  url: attachment.url,
+                  ...(attachment.filename ? { filename: attachment.filename } : {}),
+                  ...(attachment.media_type ? { mediaType: attachment.media_type } : {}),
+                })),
+              ],
             },
           },
           signal: options?.signal,
@@ -788,6 +965,66 @@ export class DayuanA2AClient {
     return result;
   }
 
+  async cancelTask(taskId: string, options?: DayuanCallOptions): Promise<DayuanTaskResult> {
+    const id = assertSafeId(taskId, 'task_id');
+    const existing = await this.loadTaskRecord(id);
+    const { payload, identity } = await this.requestA2A({
+      method: 'POST',
+      expectedIdentity: existing?.identity,
+      route: { kind: 'cancel', taskId: id },
+      signal: options?.signal,
+    });
+    const result = this.parseTaskPayload(payload, {
+      request_id: existing?.request_id,
+      action: existing?.action,
+      from_cache: false,
+    });
+    await this.saveTaskRecord({
+      task_id: result.task_id,
+      context_id: result.context_id ?? existing?.context_id,
+      identity,
+      action: existing?.action,
+      request_id: existing?.request_id,
+      result,
+    });
+    if (existing?.request_id) {
+      const receiptKey = this.receiptKey(identity, existing.request_id);
+      const receipt = asRecord(await this.storage.get(receiptKey)) as StoredReceipt | undefined;
+      if (receipt) {
+        receipt.status = result.state;
+        receipt.result = result;
+        receipt.updated_at_ms = this.clock.now();
+        await this.storage.set(receiptKey, receipt);
+      }
+    }
+    return result;
+  }
+
+  async getApprovalUrl(taskId: string, options?: DayuanCallOptions): Promise<string> {
+    const id = assertSafeId(taskId, 'task_id');
+    const existing = await this.loadTaskRecord(id);
+    const { payload } = await this.requestA2A({
+      method: 'GET',
+      expectedIdentity: existing?.identity,
+      route: { kind: 'task', taskId: id },
+      signal: options?.signal,
+    });
+    const taskObj = asRecord(payload.result) ?? asRecord(payload.task) ?? payload;
+    const state = normalizeState(asRecord(taskObj.status)?.state ?? taskObj.state);
+    if (state !== 'input_required' && state !== 'auth_required') {
+      throw new WecomError('APPROVAL_NOT_AVAILABLE', true);
+    }
+    const token = collectParts(taskObj)
+      .filter((part) => asRecord(part.metadata)?.wecom_part_type === 'approval')
+      .flatMap((part) => {
+        const data = asRecord(asRecord(part.content)?.value) ?? asRecord(part.data);
+        return Array.isArray(data?.token_id_list) ? data.token_id_list : [];
+      })
+      .find((value): value is string => typeof value === 'string' && value.trim().length > 0);
+    if (!token) throw new WecomError('APPROVAL_NOT_AVAILABLE', true);
+    return `wxwork://jump?target=agent_confirm&token=${encodeURIComponent(token.trim())}`;
+  }
+
   async reply(input: DayuanReadReplyInput, options?: DayuanCallOptions): Promise<DayuanTaskResult> {
     const taskId = assertSafeId(input.task_id, 'task_id');
     const text = cleanText(input.text, 'text', 1500);
@@ -808,6 +1045,14 @@ export class DayuanA2AClient {
       }
       if (record.result.interaction_kind === 'approval_required') {
         throw new WecomError('APPROVAL_INTERACTION_BLOCKED', true);
+      }
+      if (
+        record.action === 'test_send_self' ||
+        record.action === 'send_self' ||
+        record.action === 'send_message' ||
+        record.action === 'create_group'
+      ) {
+        throw new WecomError('UNSUPPORTED_INTERACTION_BLOCKED', true);
       }
       if (!record.result.can_reply_in_text) {
         throw new WecomError('UNSUPPORTED_INTERACTION_BLOCKED', true);

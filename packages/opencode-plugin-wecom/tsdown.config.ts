@@ -23,7 +23,7 @@ export default defineConfig([
     clean: false,
     target: 'es2022',
     platform: 'neutral',
-    external: [/^@opencode\//, 'solid-js', 'solid-js/web', 'solid-js/store', 'effect'],
+    external: [/^@opencode\//, /^node:/, 'solid-js', 'solid-js/web', 'solid-js/store', 'effect'],
     outputOptions: {
       entryFileNames: '[name].cjs',
     },

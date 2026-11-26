@@ -59,6 +59,7 @@ function createMockPluginContext(options: Record<string, unknown> = {}) {
 
   const ctx = {
     options,
+    app: { version: 'test' },
     storage,
     tool: {
       transform: async (fn: (editor: unknown) => void) => {
@@ -231,12 +232,7 @@ describe('opencode-plugin-wecom server plugin integration', () => {
       throw new Error(`unexpected ${req.method} ${req.url}`);
     });
 
-    const cliRunner = async (_bin: string, args: readonly string[]) => {
-      if (args[0] === '--version') return { exitCode: 0, stdout: '1.0.0', stderr: '' };
-      return { exitCode: 0, stdout: JSON.stringify({ docs: ['Spec.md'] }), stderr: '' };
-    };
-
-    const plugin = createWecomPlugin({ transport, clock, cliRunner });
+    const plugin = createWecomPlugin({ transport, clock });
     expect(plugin.id).toBe('opencode-plugin-wecom');
 
     const mock = createMockPluginContext();
@@ -244,7 +240,7 @@ describe('opencode-plugin-wecom server plugin integration', () => {
 
     expect(mock.namespaces.map((n) => n.name)).toContain('wecom');
     expect([...mock.tools.keys()].sort()).toEqual([
-      'wecom_cli',
+      'wecom_cancel_task',
       'wecom_login',
       'wecom_read_reply',
       'wecom_read_result',
@@ -268,7 +264,6 @@ describe('opencode-plugin-wecom server plugin integration', () => {
       .get('wecom_status')
       ?.execute({}, makeToolContext().context);
     expect((statusBefore?.output.auth as { phase: string }).phase).toBe('logged_out');
-    expect((statusBefore?.output.cli as { available: boolean }).available).toBe(true);
 
     // 2. Start QR login
     const startRes = await mock.tools
@@ -303,13 +298,7 @@ describe('opencode-plugin-wecom server plugin integration', () => {
     expect(readRes?.output.is_summary).toBe(true);
     expect(readRes?.output.summary).toContain('明天上午联调');
 
-    // 5. Optional @wecom/cli tool works
-    const cliRes = await mock.tools
-      .get('wecom_cli')
-      ?.execute({ domain: 'doc', args: ['list'] }, makeToolContext().context);
-    expect(cliRes?.output.data).toEqual({ docs: ['Spec.md'] });
-
-    // 6. RPC status & recentReceipts work for GUI/TUI
+    // 5. RPC status & recentReceipts work for GUI/TUI
     const rpcStatus = await mock.rpcRegistered?.handlers.status?.(
       {},
       { signal: new AbortController().signal },
@@ -317,7 +306,7 @@ describe('opencode-plugin-wecom server plugin integration', () => {
     expect((rpcStatus?.auth as { phase: string }).phase).toBe('ready');
     expect(rpcStatus?.recent_receipts).toHaveLength(1);
 
-    // 7. Slash commands emit synthetic session feedback
+    // 6. Slash commands emit synthetic session feedback
     await mock.commands
       .get('wecom-status')
       ?.execute({ sessionID: 'ses_1', prompt: {}, delivery: 'queue' });
@@ -333,12 +322,45 @@ describe('opencode-plugin-wecom server plugin integration', () => {
     );
     expect((statusAfterLogout?.auth as { phase: string }).phase).toBe('logged_out');
 
-    // 8. Cleanup disposes all 4 registrations
+    // 7. Cleanup disposes all 4 registrations
     if (typeof cleanup === 'function') await cleanup();
     expect(mock.disposedCount).toBe(4);
   });
 
-  it('respects enableCliTool=false, supports wecom_auth mode, /wecom-login command, and blocks approval replies', async () => {
+  it('uses write as the single gate for all opt-in write tools', async () => {
+    const legacy = createMockPluginContext({
+      enableA2AWrite: true,
+      enableSelfSendTest: true,
+      enableNativeApproval: true,
+      enableAutoApproval: true,
+    });
+    const legacyPlugin = createWecomPlugin();
+    const legacyCleanup = await legacyPlugin.setup(legacy.ctx);
+    for (const name of [
+      'wecom_send_message',
+      'wecom_create_group',
+      'wecom_test_send_self',
+      'wecom_open_approval',
+    ]) {
+      expect(legacy.tools.has(name)).toBe(false);
+    }
+    if (typeof legacyCleanup === 'function') await legacyCleanup();
+
+    const enabled = createMockPluginContext({ write: true });
+    const enabledPlugin = createWecomPlugin();
+    const enabledCleanup = await enabledPlugin.setup(enabled.ctx);
+    for (const name of [
+      'wecom_send_message',
+      'wecom_create_group',
+      'wecom_test_send_self',
+      'wecom_open_approval',
+    ]) {
+      expect(enabled.tools.has(name)).toBe(true);
+    }
+    if (typeof enabledCleanup === 'function') await enabledCleanup();
+  });
+
+  it('supports wecom_auth mode, /wecom-login command, and blocks approval replies', async () => {
     const clock = createFakeClock(1_700_000_000_000);
     let userAuthorized = false;
     const { transport } = createFakeTransport((req) => {
@@ -391,10 +413,8 @@ describe('opencode-plugin-wecom server plugin integration', () => {
     });
 
     const plugin = createWecomPlugin({ transport, clock });
-    const mock = createMockPluginContext({ enableCliTool: false });
+    const mock = createMockPluginContext();
     await plugin.setup(mock.ctx);
-
-    expect(mock.tools.has('wecom_cli')).toBe(false);
 
     const wecomAuthInfo = await mock.tools
       .get('wecom_login')
