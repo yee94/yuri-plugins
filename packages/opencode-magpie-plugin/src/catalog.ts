@@ -235,6 +235,18 @@ export const parsePresentation = (options: unknown): CatalogPresentation => {
   };
 };
 
+export const parseGatewayOptions = (options: unknown): readonly unknown[] | undefined => {
+  if (!isRecord(options) || !Object.hasOwn(options, 'gateways')) return undefined;
+  if (Object.keys(options).length !== 1)
+    throw invalidOptions('options.gateways', '请将其他选项放在各网关配置内');
+  if (!Array.isArray(options.gateways) || options.gateways.length === 0)
+    throw invalidOptions('options.gateways', '必须是非空数组');
+  return options.gateways.map((entry, index) => {
+    if (!isRecord(entry)) throw invalidOptions(`options.gateways[${index}]`, '必须是对象');
+    return entry;
+  });
+};
+
 const modelCost = (
   row: MagpieModel,
   group: boolean,

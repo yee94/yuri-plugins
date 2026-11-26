@@ -136,10 +136,9 @@ describe('magpie image', () => {
 
   it('registers two code-mode tools in one namespace and a short skill', () => {
     const tools: Parameters<ToolEditor['add']>[0][] = [];
-    registerImageTools(
-      { namespace: () => {}, add: (tool) => tools.push(tool) },
+    registerImageTools({ namespace: () => {}, add: (tool) => tools.push(tool) }, [
       { baseURL: '', token: '', remote: false, ensure: async () => {} },
-    );
+    ]);
     expect(tools.map((tool) => tool.name)).toEqual(['image_list', 'image_gen']);
     expect(
       tools.every((tool) => tool.options?.codemode && tool.options.namespace === 'magpie'),
@@ -151,6 +150,35 @@ describe('magpie image', () => {
     // Its description rides in every session, so it stays one line.
     expect(skills[0]?.description.length).toBeLessThan(120);
     expect(skills[0]?.content).toContain('image_gen');
+  });
+
+  it('merges image models and draws through the gateway that supplies each model', async () => {
+    const draws: string[] = [];
+    const serve = (name: string, ids: string[]) =>
+      gateway((request, response) => {
+        if (request.url === '/v1/models') {
+          response.end(
+            JSON.stringify({
+              data: ids.map((id) => ({ id, kind: 'image', display_name: name })),
+            }),
+          );
+          return;
+        }
+        draws.push(name);
+        response.end(JSON.stringify({ data: [{ b64_json: PNG.toString('base64') }] }));
+      });
+    const first = await serve('Local', ['codex/local', 'codex/shared']);
+    const last = await serve('Remote', ['codex/shared']);
+    const tools: Parameters<ToolEditor['add']>[0][] = [];
+    registerImageTools({ namespace: () => {}, add: (tool) => tools.push(tool) }, [first, last]);
+    const context = { signal: new AbortController().signal };
+    expect((await tools[0].execute({}, context)).content).toBe(
+      'codex/local  Local\ncodex/shared  Remote',
+    );
+    await tools[1].execute({ prompt: 'a magpie', model: 'codex/local' }, context);
+    await tools[1].execute({ prompt: 'a magpie', model: 'codex/shared' }, context);
+    await tools[1].execute({ prompt: 'a magpie' }, context);
+    expect(draws).toEqual(['Local', 'Remote', 'Remote']);
   });
 
   it('returns the saved file as a Markdown image, bracketing a path that would not parse', () => {

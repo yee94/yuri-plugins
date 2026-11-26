@@ -98,7 +98,28 @@ export const markdownImage = (path: string): string =>
 const NAMESPACE = 'magpie';
 
 /** One call to the model's code mode: found with `search`, never listed in its context. */
-export const registerImageTools = (editor: ToolEditor, connection: GatewayConnection): void => {
+export const registerImageTools = (
+  editor: ToolEditor,
+  connections: readonly GatewayConnection[],
+): void => {
+  const defaultConnection = connections[connections.length - 1];
+  const list = async (signal: AbortSignal) => {
+    const results = await Promise.allSettled(
+      connections.map(async (connection) => ({
+        connection,
+        models: await listImageModels(connection, signal),
+      })),
+    );
+    signal.throwIfAborted();
+    const catalog = new Map<string, { name: string; connection: GatewayConnection }>();
+    for (const result of results) {
+      if (result.status === 'rejected') continue;
+      const { connection, models } = result.value;
+      for (const { id, name } of models) catalog.set(id, { name, connection });
+    }
+    if (results.every((result) => result.status === 'rejected')) throw results[0].reason;
+    return catalog;
+  };
   editor.namespace({ name: NAMESPACE, description: 'Magpie image generation.' });
   const options = { namespace: NAMESPACE, codemode: true } as const;
   editor.add({
@@ -107,10 +128,10 @@ export const registerImageTools = (editor: ToolEditor, connection: GatewayConnec
     input: { type: 'object', properties: {}, additionalProperties: false },
     options,
     execute: async (_input, context) => {
-      const models = await listImageModels(connection, context.signal);
+      const models = await list(context.signal);
       return {
-        content: models.length
-          ? models.map((model) => `${model.id}  ${model.name}`).join('\n')
+        content: models.size
+          ? Array.from(models, ([id, { name }]) => `${id}  ${name}`).join('\n')
           : 'No image model is available in Magpie.',
       };
     },
@@ -135,7 +156,14 @@ export const registerImageTools = (editor: ToolEditor, connection: GatewayConnec
     },
     options,
     execute: async (input, context) => {
-      const { path, model } = await drawImage(connection, input as DrawInput, context.signal);
+      const draw = input as DrawInput;
+      let connection = defaultConnection;
+      if (draw.model && connections.length > 1) {
+        const match = (await list(context.signal)).get(draw.model);
+        if (!match) throw new Error(`Magpie 生图模型不可用：${draw.model}`);
+        connection = match.connection;
+      }
+      const { path, model } = await drawImage(connection, draw, context.signal);
       return { content: `${markdownImage(path)}${model ? `\n(${model})` : ''}` };
     },
   });

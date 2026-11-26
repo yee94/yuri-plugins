@@ -232,4 +232,93 @@ describe('Magpie discovery', () => {
     await cleanup?.();
     expect(dispose).toHaveBeenCalledTimes(6);
   });
+
+  it('merges gateway inventories by unchanged IDs and preserves each model’s connection', async () => {
+    let remoteReady = false;
+    const local = await serve((request, response) => {
+      if (request.url === '/') return void response.end(JSON.stringify({ name: 'magpie' }));
+      response.end(JSON.stringify({ data: [row('cursor', 'gpt-5.4'), row('cursor')] }));
+    });
+    const remote = await serve((request, response) => {
+      if (
+        !remoteReady ||
+        request.headers.authorization !== 'Bearer remote-key' ||
+        request.headers['x-magpie-agent'] !== 'yuri'
+      ) {
+        response.statusCode = 503;
+        return void response.end();
+      }
+      response.end(JSON.stringify({ data: [row('cursor')] }));
+    });
+    vi.stubEnv('MAGPIE_ADDR', local);
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const registration = { dispose: async () => {} };
+    let transform: (editor: ProviderEditor) => void = () => {};
+    let httpHook:
+      | ((event: {
+          sessionID: string;
+          model: { providerID: string; id: string };
+          request: Request;
+        }) => void | Promise<void>)
+      | undefined;
+    const ctx: PluginContext = {
+      options: {
+        gateways: [
+          {},
+          { agentID: 'yuri', remote: { baseURL: `${remote}/v1`, token: 'remote-key' } },
+        ],
+      },
+      provider: {
+        transform: async (callback) => {
+          transform = callback;
+          return registration;
+        },
+        reload: async () => {},
+      },
+      session: {
+        hook: async (name, callback) => {
+          if (name === 'http.request') httpHook = callback as typeof httpHook;
+          return registration;
+        },
+      },
+    };
+    const read = () => {
+      const entries: Inventory = [];
+      transform({ add: (entry) => entries.push(entry) });
+      expect(entries.map(({ info }) => info.id)).toEqual(['magpie-cursor']);
+      return entries[0].models;
+    };
+    const cleanup = await plugin.setup(ctx);
+    try {
+      expect(read()[1].settings?.baseURL).toBe(`${local}/v1`);
+      remoteReady = true;
+      await vi.advanceTimersByTimeAsync(30_000);
+      await vi.waitFor(() => expect(read()[1].settings?.baseURL).toBe(`${remote}/v1`));
+      const models = read();
+      expect(models.map(({ id }) => id)).toEqual(['gpt-5.4', 'gpt-5.5']);
+      expect(models[0].settings).toMatchObject({ baseURL: `${local}/v1`, apiKey: 'magpie' });
+      expect(models[0].headers).toMatchObject({
+        Authorization: 'Bearer magpie',
+        'X-Magpie-Agent': 'opencode',
+      });
+      expect(models[1].settings).toMatchObject({ baseURL: `${remote}/v1`, apiKey: 'remote-key' });
+      expect(models[1].headers).toMatchObject({
+        Authorization: 'Bearer remote-key',
+        'X-Magpie-Agent': 'yuri',
+      });
+      const request = new Request(`${remote}/v1/chat/completions`, { headers: models[1].headers });
+      expect(httpHook).toBeDefined();
+      await httpHook?.({ sessionID: 'session-test', model: models[1], request });
+      expect(request.headers.get('X-Magpie-Session')).toBe('session-test');
+      remoteReady = false;
+      warn.mockClear();
+      await vi.advanceTimersByTimeAsync(30_000);
+      await vi.waitFor(() => expect(warn).toHaveBeenCalled());
+      expect(read()[1].settings?.baseURL).toBe(`${remote}/v1`);
+    } finally {
+      await cleanup?.();
+      warn.mockRestore();
+    }
+  });
 });

@@ -192,6 +192,32 @@ Responses 和 Anthropic 请求同样在该前缀下使用 `responses`、`message
 
 模型发现、30 秒刷新和推理都使用同一个远端与 token。远程模式不读取本机 Magpie 地址或 Fast 配置，也不会自动启动本机网关、失败后回退到本机。首次发现失败会报错；后续刷新失败保留最近成功的目录。目录请求不跟随重定向，反代应直接处理所配置的地址。
 
+### 同时连接多个网关
+
+只添加一条插件配置，把原来各条配置的 `options` 放进 `gateways` 数组。`{}` 使用本机 Magpie；`remote`、`agentID`、`groups`、`order` 都可以按网关配置。
+
+```jsonc
+{
+  "plugins": [{
+    "package": "opencode-magpie-plugin",
+    "options": {
+      "gateways": [
+        {},
+        {
+          "agentID": "yuri",
+          "remote": {
+            "baseURL": "https://magpie.example.com/v1",
+            "token": "{env:MAGPIE_REMOTE_TOKEN}"
+          }
+        }
+      ]
+    }
+  }]
+}
+```
+
+模型按原有 provider ID 和 model ID 合并。不同模型都保留，同 ID 时后面的网关覆盖前面的定义；推理使用该模型来源网关的地址、token 和 Agent 标签。单个网关发现失败不影响其他网关，刷新失败保留它上次成功的目录。生图列表同样按原模型 ID 合并，指定模型时使用列表中对应的网关；省略模型时使用最后一项网关的默认生图模型。
+
 ### Agent 标签与原生归属
 
 `options.agentID` 是可选的请求标签，默认 `opencode`；支持 1–64 个小写字母、数字、`.`、`_`、`-`，且首位为字母或数字。它会用于模型发现、目录刷新、推理和生图请求的 `X-Magpie-Agent`，但**不会覆盖 OpenCode 的真实 User-Agent，也不是 UI 来源检测**。

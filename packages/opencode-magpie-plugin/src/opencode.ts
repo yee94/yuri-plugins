@@ -35,6 +35,7 @@ export type ModelInfo2 = {
   }[];
   package?: string;
   settings?: Record<string, unknown>;
+  headers?: Record<string, string>;
   body?: Record<string, unknown>;
 };
 
@@ -82,7 +83,11 @@ export type PluginContext = {
 };
 
 type SessionHookEvents = {
-  'http.request': { sessionID: string; request: Request };
+  'http.request': {
+    sessionID: string;
+    model: { providerID: string; id: string };
+    request: Request;
+  };
   context: ModelMessages;
   compaction: ModelMessages;
   generate: ModelMessages;
