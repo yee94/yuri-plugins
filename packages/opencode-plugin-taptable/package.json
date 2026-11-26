@@ -1,6 +1,6 @@
 {
   "name": "opencode-plugin-taptable",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Yuri 需求跟进看板与 OpenCode 维护 Skill",
   "type": "module",
   "exports": {
