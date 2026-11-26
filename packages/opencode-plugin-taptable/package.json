@@ -1,0 +1,45 @@
+{
+  "name": "opencode-plugin-taptable",
+  "version": "0.1.0",
+  "description": "Yuri 需求跟进看板与 OpenCode 维护 Skill",
+  "type": "module",
+  "exports": {
+    ".": "./dist/index.js",
+    "./gui-experimental": "./dist/gui-experimental.cjs"
+  },
+  "files": [
+    "dist",
+    "skills",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsdown && vite build",
+    "type-check": "tsc --noEmit",
+    "lint": "biome check package.json tsconfig.json src/board src/index.ts src/gui.ts src/rpc.ts tests vite.config.ts tsdown.config.ts",
+    "test": "vitest run",
+    "check": "pnpm lint && pnpm type-check && pnpm build && pnpm test && node --check dist/gui-experimental.cjs"
+  },
+  "engines": {
+    "node": ">=22.13"
+  },
+  "devDependencies": {
+    "@opencode/plugin": "2.2.5",
+    "@solidjs/vite-plugin": "^3.0.1",
+    "@solidjs/web": "^2.0.4",
+    "@tailwindcss/vite": "^4.3.5",
+    "@types/bun": "^1.3.14",
+    "@ui-sdk/core": "0.1.0-beta.17",
+    "@ui-sdk/solid": "0.1.0-beta.17",
+    "clsx": "^2.1.1",
+    "solid-js": "^2.0.4",
+    "tailwind-merge": "^3.7.1",
+    "tailwindcss": "^4.3.5",
+    "vite": "^8.3.8"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "license": "MIT"
+}

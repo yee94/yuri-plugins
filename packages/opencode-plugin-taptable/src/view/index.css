@@ -1,0 +1,115 @@
+@import "tailwindcss";
+
+:root {
+  --radius: 0.625rem;
+  --background: oklch(100% 0 0);
+  --foreground: oklch(14.5% 0 0);
+  --card: oklch(100% 0 0);
+  --card-foreground: oklch(14.5% 0 0);
+  --popover: oklch(100% 0 0);
+  --popover-foreground: oklch(14.5% 0 0);
+  --primary: oklch(20.5% 0 0);
+  --primary-foreground: oklch(98.5% 0 0);
+  --secondary: oklch(97% 0 0);
+  --secondary-foreground: oklch(20.5% 0 0);
+  --muted: oklch(97% 0 0);
+  --muted-foreground: oklch(55.6% 0 0);
+  --accent: oklch(97% 0 0);
+  --accent-foreground: oklch(20.5% 0 0);
+  --destructive: oklch(57.7% 0.245 27.325);
+  --destructive-foreground: oklch(98.5% 0 0);
+  --border: oklch(92.2% 0 0);
+  --input: oklch(92.2% 0 0);
+  --ring: oklch(70.8% 0 0);
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+}
+
+@layer base {
+  :root {
+    color-scheme: light;
+    font-family:
+      "Inter",
+      -apple-system,
+      BlinkMacSystemFont,
+      "PingFang SC",
+      "Hiragino Sans GB",
+      "Microsoft YaHei",
+      sans-serif;
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  }
+
+  *,
+  ::after,
+  ::before,
+  ::backdrop {
+    border-color: var(--border);
+    outline-color: color-mix(in oklab, var(--ring) 50%, transparent);
+  }
+
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background-color: var(--background);
+    color: var(--foreground);
+  }
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Ensure [hidden] parts from @ui-sdk/solid are not overridden by display utilities */
+[data-slot][hidden]:not([hidden="until-found"]) {
+  display: none;
+}
+
+:host {
+  font-family: var(--font-sans, system-ui, sans-serif);
+}
+
+:host .bg-zinc-50 {
+  background-color: var(--surface-elevated, var(--card, var(--background)));
+}
+
+:host :is(.bg-slate-50, .bg-blue-50, .bg-amber-50, .bg-emerald-50, .bg-violet-50) {
+  background-color: color-mix(in srgb, var(--taptable-tone, var(--foreground)) 12%, var(--background));
+  border-color: color-mix(in srgb, var(--taptable-tone, var(--foreground)) 25%, var(--border));
+  color: var(--taptable-tone, var(--foreground));
+}
+
+:host .bg-slate-50 { --taptable-tone: var(--muted-foreground); }
+:host .bg-blue-50 { --taptable-tone: var(--status-info, var(--foreground)); }
+:host .bg-amber-50 { --taptable-tone: var(--status-warning, var(--foreground)); }
+:host .bg-emerald-50 { --taptable-tone: var(--status-success, var(--foreground)); }
+:host .bg-violet-50 { --taptable-tone: var(--primary-emphasis, var(--foreground)); }
+
+:host a:hover {
+  background-color: var(--interactive-hover, var(--accent));
+  color: var(--foreground);
+  border-color: var(--border);
+}
